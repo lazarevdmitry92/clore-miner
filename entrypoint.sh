@@ -10,6 +10,9 @@ case "$MINER" in
   srb)
     set -- /opt/srbminer/SRBMiner-MULTI --disable-cpu --algorithm "${ALGO:-pearlhash}" \
       --pool "$POOL" --wallet "$WALLET.$WORKER" --api-enable --api-port 21550
+    if [ "${PEARL_K2:-}" = "1" ]; then
+      set -- "$@" --pearl-k2
+    fi
     ;;
   peak)
     set -- /opt/peakminer/peakminer --coin "${COIN:-pearl}" -o "$POOL" \
