@@ -1,0 +1,16 @@
+name: check-devfee
+
+on:
+  workflow_dispatch:
+
+jobs:
+  list:
+    runs-on: ubuntu-latest
+    steps:
+      - name: SRBMiner-MULTI --list-algorithms
+        run: |
+          curl -fsSL https://github.com/doktor83/SRBMiner-Multi/releases/download/3.6.7/SRBMiner-Multi-3-6-7-Linux.tar.gz | tar xz
+          chmod +x SRBMiner-Multi-3-6-7/SRBMiner-MULTI
+          ./SRBMiner-Multi-3-6-7/SRBMiner-MULTI --list-algorithms | tee /tmp/algos.txt
+          echo "---- pearlhash line(s) ----"
+          grep -i pearl /tmp/algos.txt || echo "not found"
