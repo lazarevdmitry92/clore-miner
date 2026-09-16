@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-: "${MINER:?MINER is required: srb, peak, krig or srb-diag}"
+: "${MINER:?MINER is required: srb, peak or srb-diag}"
 
 if [ "$MINER" = "srb-diag" ]; then
   echo "=== --help ==="
@@ -27,14 +27,8 @@ case "$MINER" in
     set -- /opt/peakminer/peakminer --coin "${COIN:-pearl}" -o "$POOL" \
       -u "$WALLET/$WORKER" --api-port 0.0.0.0:4068
     ;;
-  krig)
-    # TLS-only stratum: POOL must be the SSL port, e.g. prl.kryptex.network:8048
-    export DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1  # NativeAOT .NET binary; the image has no libicu
-    set -- /opt/krig/krig-miner --url "stratum+ssl://$POOL" --user "$WALLET/$WORKER" --no-rocm \
-      --api-host 0.0.0.0 --api-port 4070
-    ;;
   *)
-    echo "unknown MINER '$MINER': expected srb, peak or krig" >&2
+    echo "unknown MINER '$MINER': expected srb or peak" >&2
     exit 64
     ;;
 esac
