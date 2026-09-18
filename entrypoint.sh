@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-: "${MINER:?MINER is required: srb, peak or srb-diag}"
+: "${MINER:?MINER is required: srb or srb-diag}"
 
 if [ "$MINER" = "srb-diag" ]; then
   echo "=== --help ==="
@@ -20,12 +20,8 @@ case "$MINER" in
     set -- /opt/srbminer/SRBMiner-MULTI --disable-cpu --algorithm "${ALGO:-pearlhash}" \
       --pool "$POOL" --wallet "$WALLET.$WORKER" --api-enable --api-port 21550
     ;;
-  peak)
-    set -- /opt/peakminer/peakminer --coin "${COIN:-pearl}" -o "$POOL" \
-      -u "$WALLET/$WORKER" --api-port 0.0.0.0:4068
-    ;;
   *)
-    echo "unknown MINER '$MINER': expected srb or peak" >&2
+    echo "unknown MINER '$MINER': expected srb" >&2
     exit 64
     ;;
 esac
