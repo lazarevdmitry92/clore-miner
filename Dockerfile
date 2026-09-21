@@ -8,10 +8,13 @@ FROM ubuntu:24.04 AS base
 ENV NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
+# busybox carries the one-line web server that hands us /var/log from outside: a container cannot show its own
+# stdout, and Clore's client cannot ask for it, so a miner that starts and never hashes is otherwise mute.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl \
+ && apt-get install -y --no-install-recommends ca-certificates curl busybox-static \
  && rm -rf /var/lib/apt/lists/*
 
+EXPOSE 21559
 COPY entrypoint.sh /entrypoint.sh
 ENTRYPOINT ["/entrypoint.sh"]
 
