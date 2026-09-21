@@ -16,11 +16,9 @@ fi
 # its README, and our own shares are what settles the matter.
 if [ "$MINER" = "wildrig-diag" ]; then
   echo "=== --print-platforms ==="
-  /opt/wildrig/wildrig --print-platforms || echo "exit $?"
+  /opt/wildrig/wildrig-multi --print-platforms || echo "exit $?"
   echo "=== --print-devices ==="
-  /opt/wildrig/wildrig --print-devices || echo "exit $?"
-  echo "=== --help ==="
-  /opt/wildrig/wildrig --help || echo "exit $?"
+  /opt/wildrig/wildrig-multi --print-devices || echo "exit $?"
   exit 0
 fi
 
@@ -37,8 +35,11 @@ case "$MINER" in
     # No dev fee on pearlhash, and its own API port. 21551 is deliberately not in sources/fleet.MINER_BY_PORT: the
     # collector parses the SRBMiner format only, so it must not poll this one. The pilot reads 21551 itself, and that
     # is how we learn what WildRig's API even answers.
-    set -- /opt/wildrig/wildrig --algo "${ALGO:-pearlhash}" --url "stratum+tcp://$POOL" \
-      --user "$WALLET.$WORKER" --pass x --api-port 21551 --opencl-platforms nvidia
+    # The worker goes into --user after a dot, the way SRBMiner sends it: that is how the pool splits shares by
+    # server, and the pool's own per-worker figures are this pilot's main witness. WildRig's own --worker would
+    # name it elsewhere.
+    set -- /opt/wildrig/wildrig-multi --algo "${ALGO:-pearlhash}" --url "$POOL" \
+      --user "$WALLET.$WORKER" --api-port 21551 --opencl-platforms nvidia
     ;;
   *)
     echo "unknown MINER '$MINER': expected srb or wildrig" >&2

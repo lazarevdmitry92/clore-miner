@@ -29,11 +29,12 @@ FROM base AS wildrig
 ARG WILDRIG_VERSION=0.51.2
 RUN mkdir -p /opt/wildrig \
  && curl -fsSL "https://github.com/andru-kun/wildrig-multi/releases/download/${WILDRIG_VERSION}/wildrig-multi-linux-${WILDRIG_VERSION}.tar.gz" \
-    | tar xz -C /opt/wildrig --strip-components=1 \
- && chmod +x /opt/wildrig/wildrig \
+    | tar xz -C /opt/wildrig \
+ && chmod +x /opt/wildrig/wildrig-multi \
  && apt-get update \
  && apt-get install -y --no-install-recommends ocl-icd-libopencl1 \
  && rm -rf /var/lib/apt/lists/* \
  && mkdir -p /etc/OpenCL/vendors \
- && echo "libnvidia-opencl.so.1" > /etc/OpenCL/vendors/nvidia.icd
+ && echo "libnvidia-opencl.so.1" > /etc/OpenCL/vendors/nvidia.icd \
+ && /opt/wildrig/wildrig-multi --version    # a binary short of a library fails here, not on a paid rental
 EXPOSE 21551
