@@ -46,6 +46,10 @@ case "$MINER" in
     ;;
 esac
 
+# Each image carries one miner only, so a MINER that does not match it must stop here -- otherwise the loop below
+# would spin forever on a binary that is not there.
+[ -x "$1" ] || { echo "this image has no $1: MINER=$MINER belongs to the other image" >&2; exit 65; }
+
 # Spot orders and host hiccups kill the miner; restart it instead of leaving a paid GPU idle.
 while true; do
   "$@" || echo "miner exited with code $?, restarting in 10 s" >&2
