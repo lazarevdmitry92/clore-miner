@@ -3,6 +3,22 @@ set -eu
 
 : "${MINER:?MINER is required: srb, peak, krig, or the -diag form of one of them}"
 
+if [ "$MINER" = "peak-diag" ]; then
+  echo "=== --version ==="
+  /usr/local/bin/peakminer --version || echo "exit $?"
+  echo "=== --help ==="
+  /usr/local/bin/peakminer --help || echo "exit $?"
+  exit 0
+fi
+
+if [ "$MINER" = "krig-diag" ]; then
+  echo "=== --help ==="
+  /opt/krig/krig-miner --help || echo "exit $?"
+  echo "=== ldd ==="
+  ldd /opt/krig/krig-miner || echo "exit $?"
+  exit 0
+fi
+
 if [ "$MINER" = "srb-diag" ]; then
   echo "=== --help ==="
   /opt/srbminer/SRBMiner-MULTI --help || echo "exit $?"
@@ -14,6 +30,23 @@ fi
 : "${POOL:?POOL is required, e.g. prl-eu.kryptex.network:7048 (krig needs the SSL port, 8048)}"
 : "${WALLET:?WALLET is required: the Kryptex account login or a Pearl address (prl1...) to be paid at}"
 : "${WORKER:?WORKER is required, e.g. c110598}"
+
+# Everything we will ever be able to ask this container once it is running, written before the miner starts:
+# which driver and cards the host actually gave us, what the power limits are, and whether the binary loads.
+# The rest of the diagnosis is the miner's own log, which the loop below keeps on disk.
+{
+  echo "=== $(date -u +%FT%TZ) miner=$MINER pool=$POOL worker=$WORKER ==="
+  uname -a
+  echo "--- nvidia-smi ---"
+  nvidia-smi --query-gpu=index,name,driver_version,clocks.max.sm,power.limit,power.default_limit,power.max_limit \
+    --format=csv 2>&1 || echo "nvidia-smi failed: $?"
+  echo "--- persistence and accounting (can we set anything at all) ---"
+  nvidia-smi -q -d PERFORMANCE 2>&1 | head -40 || true
+} > /var/log/startup.log 2>&1
+
+# The log server: busybox serves /var/log, so `curl http://<host>:<port>/miner.log` reads the miner's own words and
+# `/startup.log` the state of the machine. The port is published only when the order asks for it.
+busybox httpd -p 21559 -h /var/log || echo "log server did not start: $?" >> /var/log/startup.log
 
 case "$MINER" in
   srb)
@@ -48,6 +81,14 @@ esac
 # Each image carries one miner only, so a MINER that does not match it must stop here -- otherwise the loop below
 # would spin forever on a binary that is not there.
 [ -x "$1" ] || { echo "this image has no $1: MINER=$MINER belongs to the other image" >&2; exit 65; }
+
+# A miner that enumerates the cards and hashes on none (KRig, 21.09) says nothing about why. Its libraries do.
+{
+  echo "--- command ---"
+  echo "$@"
+  echo "--- ldd $1 ---"
+  ldd "$1" 2>&1 || echo "ldd failed: $?"
+} >> /var/log/startup.log 2>&1
 
 # Spot orders and host hiccups kill the miner; restart it instead of leaving a paid GPU idle.
 # The copy on disk is the only diagnosis when a miner starts but never hashes: a container's own stdout cannot be
