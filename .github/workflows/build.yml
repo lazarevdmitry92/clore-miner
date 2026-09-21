@@ -22,6 +22,10 @@ jobs:
             tags: |
               ghcr.io/${{ github.repository_owner }}/clore-miner:wildrig
               ghcr.io/${{ github.repository_owner }}/clore-miner:wildrig-${{ github.sha }}
+          - target: krig
+            tags: |
+              ghcr.io/${{ github.repository_owner }}/clore-miner:krig
+              ghcr.io/${{ github.repository_owner }}/clore-miner:krig-${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
       - uses: docker/login-action@v3

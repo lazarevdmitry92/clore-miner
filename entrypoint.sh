@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-: "${MINER:?MINER is required: srb, wildrig, or the -diag form of either}"
+: "${MINER:?MINER is required: srb, wildrig, krig, or the -diag form of one of them}"
 
 if [ "$MINER" = "srb-diag" ]; then
   echo "=== --help ==="
@@ -22,7 +22,7 @@ if [ "$MINER" = "wildrig-diag" ]; then
   exit 0
 fi
 
-: "${POOL:?POOL is required, e.g. prl-eu.kryptex.network:7048}"
+: "${POOL:?POOL is required, e.g. prl-eu.kryptex.network:7048 (krig needs the SSL port, 8048)}"
 : "${WALLET:?WALLET is required: Kryptex mining username}"
 : "${WORKER:?WORKER is required, e.g. c110598}"
 
@@ -41,8 +41,14 @@ case "$MINER" in
     set -- /opt/wildrig/wildrig-multi --algo "${ALGO:-pearlhash}" --url "$POOL" \
       --user "$WALLET.$WORKER" --api-port 21551 --opencl-platforms nvidia
     ;;
+  krig)
+    # Kryptex's own miner: no dev fee, TLS-only stratum (POOL must be the SSL port), and the worker goes after a
+    # slash, not a dot. --no-rocm skips the AMD probe on a fleet that is all NVIDIA.
+    set -- /opt/krig/krig-miner --url "stratum+ssl://$POOL" --user "$WALLET/$WORKER" --no-rocm \
+      --api-host 0.0.0.0 --api-port 4070
+    ;;
   *)
-    echo "unknown MINER '$MINER': expected srb or wildrig" >&2
+    echo "unknown MINER '$MINER': expected srb, wildrig or krig" >&2
     exit 64
     ;;
 esac

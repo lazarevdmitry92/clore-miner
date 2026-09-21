@@ -41,3 +41,18 @@ RUN mkdir -p /opt/wildrig \
  && echo "libnvidia-opencl.so.1" > /etc/OpenCL/vendors/nvidia.icd \
  && /opt/wildrig/wildrig-multi --version 2>&1 | grep -q "WildRig Multi"
 EXPOSE 21551
+
+
+# Kryptex's own miner: 0% dev fee and the only free one the pool itself lists. Pinned by checksum -- a young project,
+# and the binary is what we pay with. Its stratum is TLS-only, so POOL must name the SSL port (8048).
+FROM base AS krig
+ARG KRIG_VERSION=1.5.2
+ARG KRIG_SHA256=53863c153c7fddf711482de21414392f856ed3472692757887e65b1c7583005e
+ENV DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
+RUN curl -fsSL "https://github.com/kryptex/krig-miner/releases/download/v${KRIG_VERSION}/krig-miner-${KRIG_VERSION}-linux-x64.tar.gz" -o /tmp/krig.tar.gz \
+ && echo "${KRIG_SHA256}  /tmp/krig.tar.gz" | sha256sum -c - \
+ && mkdir /opt/krig \
+ && tar xzf /tmp/krig.tar.gz -C /opt/krig \
+ && rm /tmp/krig.tar.gz \
+ && /opt/krig/krig-miner --help 2>&1 | grep -qi -- "--url"
+EXPOSE 4070
