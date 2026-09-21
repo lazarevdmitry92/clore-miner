@@ -18,6 +18,10 @@ jobs:
             tags: |
               ghcr.io/${{ github.repository_owner }}/clore-miner:latest
               ghcr.io/${{ github.repository_owner }}/clore-miner:${{ github.sha }}
+          - target: peak
+            tags: |
+              ghcr.io/${{ github.repository_owner }}/clore-miner:peak
+              ghcr.io/${{ github.repository_owner }}/clore-miner:peak-${{ github.sha }}
           - target: krig
             tags: |
               ghcr.io/${{ github.repository_owner }}/clore-miner:krig
