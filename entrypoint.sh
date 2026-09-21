@@ -58,7 +58,9 @@ esac
 [ -x "$1" ] || { echo "this image has no $1: MINER=$MINER belongs to the other image" >&2; exit 65; }
 
 # Spot orders and host hiccups kill the miner; restart it instead of leaving a paid GPU idle.
+# The copy on disk is the only diagnosis when a miner starts but never hashes: a container's own stdout cannot be
+# read from inside it, while `ssh` into the order can read a file (the order needs ssh_password for that).
 while true; do
-  "$@" || echo "miner exited with code $?, restarting in 10 s" >&2
+  { "$@" 2>&1; echo "miner exited with code $?, restarting in 10 s"; } | tee -a /var/log/miner.log
   sleep 10
 done
