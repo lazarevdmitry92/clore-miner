@@ -18,10 +18,6 @@ jobs:
             tags: |
               ghcr.io/${{ github.repository_owner }}/clore-miner:latest
               ghcr.io/${{ github.repository_owner }}/clore-miner:${{ github.sha }}
-          - target: wildrig
-            tags: |
-              ghcr.io/${{ github.repository_owner }}/clore-miner:wildrig
-              ghcr.io/${{ github.repository_owner }}/clore-miner:wildrig-${{ github.sha }}
           - target: krig
             tags: |
               ghcr.io/${{ github.repository_owner }}/clore-miner:krig
