@@ -20,11 +20,25 @@ if [ "$MINER" = "krig-diag" ]; then
 fi
 
 if [ "$MINER" = "srb-diag" ]; then
-  echo "=== --help ==="
-  /opt/srbminer/SRBMiner-MULTI --help || echo "exit $?"
-  echo "=== --list-algorithms ==="
-  /opt/srbminer/SRBMiner-MULTI --list-algorithms || echo "exit $?"
-  exit 0
+  # Диагностика на живой карте: у --gpu-extra-config нет ни одного примера ни в Parameters, ни в релизах,
+  # ни в examples.md, поэтому формат значения спрашиваем у самого бинаря. Вывод ложится в журнал, контейнер
+  # остаётся жив -- иначе лог-порт умрёт вместе с ним и читать будет нечего.
+  {
+    echo "=== --help ==="
+    /opt/srbminer/SRBMiner-MULTI --help 2>&1 || echo "exit $?"
+    echo "=== --list-algorithms ==="
+    /opt/srbminer/SRBMiner-MULTI --list-algorithms 2>&1 || echo "exit $?"
+    echo "=== --list-devices ==="
+    /opt/srbminer/SRBMiner-MULTI --list-devices 2>&1 || echo "exit $?"
+    for value in help ? list 0 1; do
+      echo "=== --gpu-extra-config $value (15 с) ==="
+      timeout 15 /opt/srbminer/SRBMiner-MULTI --disable-cpu --algorithm "${ALGO:-pearlhash}" \
+        --pool "${POOL:-prl.kryptex.network:7048}" --wallet "${WALLET:-x}.${WORKER:-diag}" \
+        --gpu-extra-config "$value" 2>&1 | head -60 || echo "exit $?"
+    done
+  } > /var/log/miner.log 2>&1
+  echo "диагностика записана в /var/log/miner.log; контейнер остаётся жив для чтения"
+  while true; do sleep 300; done
 fi
 
 : "${POOL:?POOL is required, e.g. prl-eu.kryptex.network:7048 (krig needs the SSL port, 8048)}"
