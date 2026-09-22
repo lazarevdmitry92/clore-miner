@@ -22,6 +22,22 @@ jobs:
             tags: |
               ghcr.io/${{ github.repository_owner }}/clore-miner:peak
               ghcr.io/${{ github.repository_owner }}/clore-miner:peak-${{ github.sha }}
+          - target: forge
+            tags: |
+              ghcr.io/${{ github.repository_owner }}/clore-miner:forge
+              ghcr.io/${{ github.repository_owner }}/clore-miner:forge-${{ github.sha }}
+          - target: bz
+            tags: |
+              ghcr.io/${{ github.repository_owner }}/clore-miner:bz
+              ghcr.io/${{ github.repository_owner }}/clore-miner:bz-${{ github.sha }}
+          - target: rg
+            tags: |
+              ghcr.io/${{ github.repository_owner }}/clore-miner:rg
+              ghcr.io/${{ github.repository_owner }}/clore-miner:rg-${{ github.sha }}
+          - target: fl4sh
+            tags: |
+              ghcr.io/${{ github.repository_owner }}/clore-miner:fl4sh
+              ghcr.io/${{ github.repository_owner }}/clore-miner:fl4sh-${{ github.sha }}
           - target: krig
             tags: |
               ghcr.io/${{ github.repository_owner }}/clore-miner:krig

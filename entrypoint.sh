@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-: "${MINER:?MINER is required: srb, peak, krig, or the -diag form of one of them}"
+: "${MINER:?MINER is required: srb, peak, krig, forge, bz, rg, fl4sh, or the -diag form of one}"
 
 if [ "$MINER" = "peak-diag" ]; then
   echo "=== --version ==="
@@ -64,6 +64,26 @@ case "$MINER" in
     set -- /usr/local/bin/peakminer --coin "$coin" --url "$POOL" --user "$WALLET.$WORKER" \
       --api-port 0.0.0.0:4068
     ;;
+  forge)
+    # Kryptex стоит в его собственном списке пулов, так что адрес идёт как есть; воркер -- отдельным полем.
+    set -- /usr/local/bin/forge --algorithm "${ALGO:-pearlhash}" --wallet "$WALLET" --pool "$POOL" \
+      --worker "$WORKER" --api-bind 0.0.0.0:7777
+    ;;
+  bz)
+    # -p это адрес пула (не пароль), схему требует явно; 4020 -- его собственная страница и API.
+    set -- /usr/local/bin/bzminer -a pearl -p "stratum+tcp://$POOL" -w "$WALLET" --worker "$WORKER" \
+      --llm_port 4020
+    ;;
+  rg)
+    # --proto kryptex: у него отдельный режим под диалект этого пула, по умолчанию он говорит на AkoyaV2.
+    set -- /usr/local/bin/rgminer --algo pearl --stratum "$POOL" --wallet "$WALLET.$WORKER" --proto kryptex \
+      --api-host 0.0.0.0 --api-port 21553
+    ;;
+  fl4sh)
+    # API не объявляет вовсе: всё, что он скажет, окажется в /var/log/miner.log и уйдёт наружу лог-портом.
+    set -- /usr/local/bin/fl4shminer -a "${ALGO:-pearlhash}" -pool "stratum+tcp://$POOL" \
+      -w "$WALLET.$WORKER" -pass x
+    ;;
   krig)
     # Kryptex's own miner: no dev fee, TLS-only stratum (POOL must be the SSL port), and the worker goes after a
     # slash, not a dot. --no-rocm skips the AMD probe on a fleet that is all NVIDIA.
@@ -73,7 +93,7 @@ case "$MINER" in
       --api-host 0.0.0.0 --api-port 4070
     ;;
   *)
-    echo "unknown MINER '$MINER': expected srb, peak or krig" >&2
+    echo "unknown MINER '$MINER': expected srb, peak, krig, forge, bz, rg or fl4sh" >&2
     exit 64
     ;;
 esac
