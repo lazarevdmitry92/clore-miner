@@ -11,9 +11,14 @@ ENV NVIDIA_VISIBLE_DEVICES=all \
 
 # busybox carries the one-line web server that hands us /var/log from outside: a container cannot show its own
 # stdout, and Clore's client cannot ask for it, so a miner that starts and never hashes is otherwise mute.
+# xz -- rgminer распаковывает свой payload через tar+xz и без него падает на старте;
+# ocl-icd + nvidia.icd -- fl4shminer линкуется с libOpenCL.so.1, а контейнерный runtime кладёт драйвер,
+# но не говорит, где его искать. Обе беды нашлись только по журналу контейнера (проба 22.09).
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl busybox-static \
- && rm -rf /var/lib/apt/lists/*
+ && apt-get install -y --no-install-recommends ca-certificates curl busybox-static xz-utils ocl-icd-libopencl1 \
+ && rm -rf /var/lib/apt/lists/* \
+ && mkdir -p /etc/OpenCL/vendors \
+ && echo "libnvidia-opencl.so.1" > /etc/OpenCL/vendors/nvidia.icd
 
 EXPOSE 21559
 COPY entrypoint.sh /entrypoint.sh

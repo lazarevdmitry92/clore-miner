@@ -71,8 +71,8 @@ case "$MINER" in
     ;;
   bz)
     # -p это адрес пула (не пароль), схему требует явно; 4020 -- его собственная страница и API.
-    set -- /usr/local/bin/bzminer -a pearl -p "stratum+tcp://$POOL" -w "$WALLET" --worker "$WORKER" \
-      --llm_port 4020
+    # --llm_port этой сборкой не распознан (проба 22.09), поэтому API наружу нет: свидетель -- журнал.
+    set -- /usr/local/bin/bzminer -a pearl -p "stratum+tcp://$POOL" -w "$WALLET" --worker "$WORKER"
     ;;
   rg)
     # --proto kryptex: у него отдельный режим под диалект этого пула, по умолчанию он говорит на AkoyaV2.
