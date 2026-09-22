@@ -59,6 +59,18 @@ fi
     --format=csv 2>&1 || echo "nvidia-smi failed: $?"
   echo "--- persistence and accounting (can we set anything at all) ---"
   nvidia-smi -q -d PERFORMANCE 2>&1 | head -40 || true
+  # Can we hold a hot card back by its power limit instead of stopping it? Lowering the limit cools continuously,
+  # where five idle minutes only buy a pause -- the card is back at its plateau in under two minutes (FACTS.md:
+  # 3.0 C/min, plateau in 1.8). Setting a card's CURRENT limit changes nothing and answers the only question that
+  # matters: whether the marketplace's container may write to NVML at all. The answer rides out in startup.log.
+  echo "--- may we set a power limit (current value, so nothing changes) ---"
+  cur=$(nvidia-smi -i 0 --query-gpu=power.limit --format=csv,noheader,nounits 2>/dev/null | tr -d ' ')
+  if [ -n "$cur" ]; then
+    echo "gpu 0 limit is ${cur}W, setting the same"
+    nvidia-smi -i 0 -pl "$cur" 2>&1 || echo "power limit refused: $?"
+  else
+    echo "no power.limit readable -- nothing to try"
+  fi
 } > /var/log/startup.log 2>&1
 
 # The log server: busybox serves /var/log, so `curl http://<host>:<port>/miner.log` reads the miner's own words and
