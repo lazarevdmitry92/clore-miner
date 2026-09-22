@@ -76,8 +76,10 @@ case "$MINER" in
     ;;
   rg)
     # --proto kryptex: у него отдельный режим под диалект этого пула, по умолчанию он говорит на AkoyaV2.
+    # --no-cmp-unlock: без него он лезет модифицировать драйвер ради разблокировки CMP-карт, падает с кодом 126
+    # и уходит в вечный перезапуск — прав на это в контейнере площадки нет (проба 22.09).
     set -- /usr/local/bin/rgminer --algo pearl --stratum "$POOL" --wallet "$WALLET.$WORKER" --proto kryptex \
-      --api-host 0.0.0.0 --api-port 21553
+      --no-cmp-unlock --api-host 0.0.0.0 --api-port 21553
     ;;
   fl4sh)
     # API не объявляет вовсе: всё, что он скажет, окажется в /var/log/miner.log и уйдёт наружу лог-портом.
