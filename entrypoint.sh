@@ -50,8 +50,12 @@ busybox httpd -p 21559 -h /var/log || echo "log server did not start: $?" >> /va
 
 case "$MINER" in
   srb)
+    # MINER_FLAGS -- дополнительные ключи майнера для проб настроек (--pearl-k2, --gpu-intensity и подобные).
+    # Намеренно без кавычек: строка разбивается на слова, иначе майнер получит один склеенный аргумент.
+    # Ключи, меняющие настройки чужой карты (--gpu-cclock*, --gpu-plimit*, --gpu-fan*), сюда не передаются:
+    # железо арендованное, и его режим -- не наш ресурс (решение пользователя 22.09).
     set -- /opt/srbminer/SRBMiner-MULTI --disable-cpu --algorithm "${ALGO:-pearlhash}" \
-      --pool "$POOL" --wallet "$WALLET.$WORKER" --api-enable --api-port 21550
+      --pool "$POOL" --wallet "$WALLET.$WORKER" --api-enable --api-port 21550 ${MINER_FLAGS:-}
     ;;
   peak)
     # -u goes to the pool verbatim, so it carries the worker the way Kryptex wants it -- after a dot, like SRBMiner
