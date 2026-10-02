@@ -14,6 +14,10 @@ jobs:
     strategy:
       matrix:
         include:
+          - target: srb-peak
+            tags: |
+              ghcr.io/${{ github.repository_owner }}/clore-miner:srb-peak
+              ghcr.io/${{ github.repository_owner }}/clore-miner:srb-peak-${{ github.sha }}
           - target: srb
             tags: |
               ghcr.io/${{ github.repository_owner }}/clore-miner:latest

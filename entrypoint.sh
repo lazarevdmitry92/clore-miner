@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-: "${MINER:?MINER is required: srb, peak, krig, forge, bz, rg, fl4sh, or the -diag form of one}"
+: "${MINER:?MINER is required: srb-peak, srb, peak, krig, forge, bz, rg, fl4sh, or the -diag form of one}"
 
 if [ "$MINER" = "peak-diag" ]; then
   echo "=== --version ==="
@@ -65,6 +65,71 @@ fi
 # `/startup.log` the state of the machine. The port is published only when the order asks for it.
 busybox httpd -p 21559 -h /var/log || echo "log server did not start: $?" >> /var/log/startup.log
 
+# Can the host reach the pool at all: a host that firewalls the pool port (`Socket error 113`, 112640) answers here in
+# the first minute -- ok, timeout, or the system's own words (refused, no route to host).
+pool_host="${POOL%:*}"
+pool_port="${POOL##*:}"
+{
+  printf -- "--- pool %s:%s tcp ---\n" "$pool_host" "$pool_port"
+  if out=$(timeout 5 bash -c "exec 3<>/dev/tcp/$pool_host/$pool_port" 2>&1); then
+    echo ok
+  elif [ $? -eq 124 ]; then
+    echo timeout
+  else
+    echo "failed: $out"
+  fi
+} >> /var/log/startup.log 2>&1
+
+# srb-peak: SRBMiner first; when its dev fee is blocked (RU/UA hosts: `Devfee related operations were blocked`, then it
+# exits) twice in a row, PeakMiner on the same pool, worker and API port, for good. PeakMiner failing with CUDA_700 three
+# times in a row (RTX 5070 Ti on driver 615) leaves the container idle: the monitor sees no miner and drops the order.
+# The choice is in /var/log/miner.choice, read through the log port; the API answer itself names the miner too.
+if [ "$MINER" = "srb-peak" ]; then
+  choose() { echo "$1 $(date -u +%FT%TZ) $2" > /var/log/miner.choice; }
+  {
+    echo "--- srb-peak ---"
+    ldd /opt/srbminer/SRBMiner-MULTI 2>&1 || echo "ldd failed: $?"
+    /usr/local/bin/peakminer --version 2>&1 || echo "peakminer --version failed: $?"
+  } >> /var/log/startup.log 2>&1
+
+  choose srb start
+  blocked=0
+  while [ "$blocked" -lt 2 ]; do
+    # each run gets a fresh srb.log, the run before it stays as srb.prev.log
+    mv -f /var/log/srb.log /var/log/srb.prev.log 2>/dev/null || true
+    /opt/srbminer/SRBMiner-MULTI --disable-cpu --algorithm "${ALGO:-pearlhash}" --pool "$POOL" \
+      --wallet "$WALLET.$WORKER" --api-enable --api-port 21550 --log-file /var/log/srb.log ${MINER_FLAGS:-} \
+      >> /var/log/miner.log 2>&1 || true
+    if grep -q "Devfee related operations were blocked" /var/log/srb.log 2>/dev/null; then
+      blocked=$((blocked + 1))
+    else
+      blocked=0
+    fi
+    echo "$(date -u +%FT%TZ) SRBMiner exited, dev fee blocked $blocked run(s) in a row, next start in 10 s" >> /var/log/miner.log
+    sleep 10
+  done
+
+  coin="${ALGO:-pearlhash}"
+  if [ "$coin" = "pearlhash" ]; then coin=pearl; fi
+  choose peak "SRBMiner dev fee blocked twice"
+  touch /var/log/peak.log
+  cuda=0
+  while [ "$cuda" -lt 3 ]; do
+    before=$(wc -l < /var/log/peak.log)
+    /usr/local/bin/peakminer --coin "$coin" --url "$POOL" --user "$WALLET.$WORKER" --api-port 0.0.0.0:21550 \
+      >> /var/log/peak.log 2>&1 || true
+    if tail -n "+$((before + 1))" /var/log/peak.log | grep -qi -e CUDA_700 -e "illegal address"; then
+      cuda=$((cuda + 1))
+    else
+      cuda=0
+    fi
+    echo "$(date -u +%FT%TZ) PeakMiner exited, CUDA_700 $cuda run(s) in a row, next start in 10 s" >> /var/log/peak.log
+    sleep 10
+  done
+  choose none "PeakMiner CUDA_700 three times in a row"
+  while true; do sleep 300; done
+fi
+
 case "$MINER" in
   srb)
     # MINER_FLAGS -- дополнительные ключи майнера для проб настроек (--pearl-k2, --gpu-intensity и подобные).
@@ -116,7 +181,7 @@ case "$MINER" in
       --api-host 0.0.0.0 --api-port 4070
     ;;
   *)
-    echo "unknown MINER '$MINER': expected srb, peak, krig, forge, bz, rg or fl4sh" >&2
+    echo "unknown MINER '$MINER': expected srb-peak, srb, peak, krig, forge, bz, rg or fl4sh" >&2
     exit 64
     ;;
 esac
