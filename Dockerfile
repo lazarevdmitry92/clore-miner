@@ -1,5 +1,6 @@
-# One image per miner, so nothing can start the wrong one and neither image pays for the other's binary.
-# Built with one `--target` per miner (see .github/workflows/build.yml): srb, peak, krig, forge, bz, rg, fl4sh.
+# One image per miner, so nothing can start the wrong one and neither image pays for the other's binary -- except srb-peak,
+# the fleet's image: SRBMiner, and PeakMiner where SRBMiner's dev fee is blocked (entrypoint.sh).
+# Built with one `--target` per miner (see .github/workflows/build.yml): srb-peak, srb, peak, krig, forge, bz, rg, fl4sh.
 # WildRig had a
 # fourth target until 21.09: Kryptex does not speak Stratum v1 at all, so a miner written for it has nothing
 # to assemble here (FACTS.md, "Пул и майнер").
@@ -12,10 +13,12 @@ ENV NVIDIA_VISIBLE_DEVICES=all \
 # busybox carries the one-line web server that hands us /var/log from outside: a container cannot show its own
 # stdout, and Clore's client cannot ask for it, so a miner that starts and never hashes is otherwise mute.
 # xz -- rgminer распаковывает свой payload через tar+xz и без него падает на старте;
+# wget -- SRBMiner names it in its own refusal on RU/UA hosts ("Devfee related operations were blocked! ... Make sure you
+# have 'wget' installed", pilot api_never_started): with it the dev fee may pass and PeakMiner not be needed there.
 # ocl-icd + nvidia.icd -- fl4shminer линкуется с libOpenCL.so.1, а контейнерный runtime кладёт драйвер,
 # но не говорит, где его искать. Обе беды нашлись только по журналу контейнера (проба 22.09).
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl busybox-static xz-utils ocl-icd-libopencl1 \
+ && apt-get install -y --no-install-recommends ca-certificates curl wget busybox-static xz-utils ocl-icd-libopencl1 \
  && rm -rf /var/lib/apt/lists/* \
  && mkdir -p /etc/OpenCL/vendors \
  && echo "libnvidia-opencl.so.1" > /etc/OpenCL/vendors/nvidia.icd
@@ -44,6 +47,12 @@ RUN curl -fsSL "https://github.com/peakminer/peakminer/releases/download/v${PEAK
  && chmod +x /usr/local/bin/peakminer \
  && peakminer --version 2>&1 | grep -qi peakminer
 EXPOSE 4068
+
+
+# The fleet's image: both miners, one API port (21550) whichever runs -- the order, the collector and Vast's port map stay
+# as they are when the container goes over to PeakMiner.
+FROM srb AS srb-peak
+COPY --from=peak /usr/local/bin/peakminer /usr/local/bin/peakminer
 
 
 # Вторая пачка кандидатов (проба 22.09). Каждый — своя цель, свой бинарь, свой порт API: образ по-прежнему везёт
