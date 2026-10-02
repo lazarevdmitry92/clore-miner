@@ -12,6 +12,8 @@ jobs:
   image:
     runs-on: ubuntu-latest
     strategy:
+      # one miner's release gone upstream (fl4sh 1.4.4 -- 404 on 02.10) must not cancel the others
+      fail-fast: false
       matrix:
         include:
           - target: srb-peak
