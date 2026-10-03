@@ -4,8 +4,8 @@
     <- mining.notify {job_id, header (76 B hex), target (BE hex, share target), height, cert_version}
     -> mining.submit {"job_id", "plain_proof": base64(bincode PlainProof)}
 
-TLS: the certificate is issued for pearl.herominers.com, the node host (de.…) may differ -> the name to check
-is set apart from the host. Every line in both directions goes to a jsonl log {"ts","utc","dir","conn","raw"}.
+TLS: a node's certificate names the node itself (us.pearl.herominers.com, …), except de, which names
+pearl.herominers.com -> either name is accepted, the chain is always verified (tls_wrap). Every line in both directions goes to a jsonl log {"ts","utc","dir","conn","raw"}.
 No line from the pool for idle_timeout (HM sends a job every ~35 s) -> the connection is dropped and made again.
 
 Nodes: one or more official URLs of the same pool (`--pool url,url` or `hm` -- every HeroMiners node of FACTS.md).
@@ -93,6 +93,20 @@ def parse_url(url: str):
     if u.scheme not in ("stratum+ssl", "stratum+tls", "stratum+tcp") or not u.hostname or not u.port:
         raise ValueError(f"pool url must be stratum+ssl://host:port or stratum+tcp://host:port, got {url!r}")
     return u.hostname, u.port, u.scheme != "stratum+tcp"
+
+
+def tls_wrap(sock, host: str, pool_name: str):
+    """TLS with the chain verified and the name checked against the node's own host or the pool's name: HM nodes
+    carry their own name (us.pearl.herominers.com, …) except de, whose certificate names pearl.herominers.com
+    (handshakes of 03.10 from atlas). Any other name -> ssl.SSLCertVerificationError, the connection fails."""
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False                      # the name is checked below, against two allowed names
+    tls = ctx.wrap_socket(sock, server_hostname=host)
+    names = {v for k, v in tls.getpeercert().get("subjectAltName", ()) if k == "DNS"}
+    if not names & {host, pool_name}:
+        tls.close()
+        raise ssl.SSLCertVerificationError(f"certificate names {sorted(names)}, want {host} or {pool_name}")
+    return tls
 
 
 def hm_urls() -> list[str]:
@@ -188,8 +202,7 @@ class Pool:
     def _connect(self):
         sock = socket.create_connection((self.host, self.port), timeout=15)
         if self.tls:
-            ctx = ssl.create_default_context()
-            sock = ctx.wrap_socket(sock, server_hostname=self.tls_name)
+            sock = tls_wrap(sock, self.host, self.tls_name)
         sock.settimeout(POLL)
         return sock
 

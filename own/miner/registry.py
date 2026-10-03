@@ -21,10 +21,14 @@ class KernelSpec:
 # k 331 -- v1 `search` on 8x V100 at 21920 (TZ_v100_kernel_v2.md §1)
 V100 = KernelSpec("v100", "libpearl_v100.so", "v100", 2048, 65536, 2048, 65536,
                   ("v100-hmma884-128x256", "v100-hmma884-256x128", "v100-hmma884-128x128"), 331.0)
-# soat_backend/README.md: contiguous 16x16, shapes multiples of 256; a temporary kernel, tunes its own configs
-SOAT = KernelSpec("soat", "libpearl_soat.so", "16x16", 2048, 4096, 16384, 4096, (), None)
+# kernels/sm80/README.md: tile 8x16, one fat binary for sm_80/86/89/120, operands built on the card (pearl_job /
+# pearl_pass); the library exports its variants. n by L2: Ampere GA10x 3-6 MB keeps B'^T at n = k = 2048 (4 MB);
+# A100 (40 MB), Ada and Blackwell (32-96 MB) take n = 8192 (16 MB) -- a pass 4x longer, so building A' (m*k bytes per
+# pass) costs ~4% instead of ~15% (kernels/common/README.md).
+SM80_SMALL_L2 = KernelSpec("sm80", "libpearl_sm80.so", "8x16", 2048, 65536, 2048, 65536, (), None)
+SM80 = KernelSpec("sm80", "libpearl_sm80.so", "8x16", 2048, 65536, 8192, 65536, (), None)
 
-REGISTRY = {"7.0": V100, "8.0": SOAT, "8.6": SOAT, "8.9": SOAT, "12.0": SOAT}
+REGISTRY = {"7.0": V100, "8.0": SM80, "8.6": SM80_SMALL_L2, "8.9": SM80, "12.0": SM80}
 
 
 class NoKernel(LookupError):

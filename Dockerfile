@@ -137,8 +137,17 @@ RUN curl -fsSL "https://download.quanpool.com/quanpool-miner-${QP_VERSION}-linux
 # driver's libcuda.so.1, which the host's NVIDIA runtime brings. `make ptxas` prints registers and spills of every
 # kernel into the build log.
 FROM nvidia/cuda:12.6.3-devel-ubuntu24.04 AS own-kernel
+COPY own/kernels/common/ /src/common/
 COPY own/kernels/v100/ /src/v100/
 RUN cd /src/v100 && make && make ptxas
+
+# own-sm80: our kernel of sm_80/86/89/120 cards (own/kernels/sm80 + common: int8 mma.m16n8k32, operands built on the
+# card through pearl_job / pearl_pass). One fat binary for the four architectures; sm_120 needs CUDA >= 12.8. cudart
+# static, NVML by dlopen: only the driver's libcuda.so.1 stays, as with v100.
+FROM nvidia/cuda:12.8.1-devel-ubuntu24.04 AS own-sm80
+COPY own/kernels/common/ /src/common/
+COPY own/kernels/sm80/ /src/sm80/
+RUN cd /src/sm80 && make && make ptxas
 
 # own-soat: the temporary kernel of sm_80/86/89/120 cards -- our pearl_search wrapper (own/kernels/soat, from
 # pilots/miner/builds/soat_backend) over the SOAT kernels included unchanged (blindrun/soat-miner 48defc8, MIT: its
@@ -151,7 +160,9 @@ RUN cd /src/soat && make fat SOAT=soat-48defc8
 # own: our own Pearl miner (host side in Python; pilots/miner/builds, outside git -- a copy of its miner/, ref/,
 # acceptance/accept.py and the kernel sources lives in own/). The entrypoint runs its supervisor on every card
 # (--all-gpus): each card gets the kernel of its compute capability from /opt/own/kernels (miner/registry.py) --
-# libpearl_v100.so for sm_70, libpearl_soat.so for sm_80 and up; the v100 bench keeps its files in kernels/v100/. It
+# libpearl_v100.so for sm_70, libpearl_sm80.so for sm_80 and up (libpearl_soat.so stays in the image, unused by the
+# registry); the benches keep their files in kernels/v100/ and kernels/sm80/. Both kernels build the operands on the
+# card (pearl_job / pearl_pass, TZ_operands_gpu.md): per pass the host hands over the nonce alone. It
 # runs with --dry-run unless DRY_RUN=0, so this image sends nothing to the pool by default; MINER=own-idle starts no
 # miner at all (a container to bench the kernel over ssh). Ubuntu's python3 refuses a system-wide pip (PEP 668): a
 # venv. The checks at the end fail the build here, not on a paid rental: the import of the miner and its supervisor,
@@ -167,10 +178,13 @@ RUN apt-get update \
 COPY own/ /opt/own/
 COPY --from=own-kernel /src/v100/build/libpearl_v100.so /src/v100/build/pearl_bench /opt/own/kernels/v100/
 COPY --from=own-soat /src/soat/libpearl_soat.so /opt/own/kernels/
+COPY --from=own-sm80 /src/sm80/build/libpearl_sm80.so /src/sm80/build/pearl_bench /opt/own/kernels/sm80/
 ENV PYTHONPATH=/opt/own
 RUN cd /opt/own && ln -s v100/libpearl_v100.so /opt/own/kernels/libpearl_v100.so \
+ && ln -s sm80/libpearl_sm80.so /opt/own/kernels/libpearl_sm80.so \
  && /opt/own/venv/bin/python -c "import miner.main, miner.supervisor" \
- && for f in /opt/own/kernels/libpearl_v100.so /opt/own/kernels/v100/pearl_bench /opt/own/kernels/libpearl_soat.so; do \
+ && for f in /opt/own/kernels/libpearl_v100.so /opt/own/kernels/v100/pearl_bench /opt/own/kernels/libpearl_soat.so \
+             /opt/own/kernels/libpearl_sm80.so /opt/own/kernels/sm80/pearl_bench; do \
       ldd "$f"; \
       if ldd "$f" | grep "not found" | grep -v "libcuda\.so\.1"; then echo "$f: missing libraries" >&2; exit 1; fi; \
     done

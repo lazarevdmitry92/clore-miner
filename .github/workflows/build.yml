@@ -63,7 +63,7 @@ jobs:
           if [ "$GITHUB_REF" = refs/heads/image ]; then tags="$tags,$IMAGE:$FLOAT"; fi
           echo "tags: $tags"
           echo "tags=$tags" >> "$GITHUB_OUTPUT"
-      # the two CUDA devel stages of own and own-prof (nvidia/cuda 12.6 for v100, 12.8 for soat, ~8 GB unpacked each)
+      # the CUDA devel stages of own and own-prof (nvidia/cuda 12.6 for v100, 12.8 for sm80 and soat, ~8 GB unpacked each)
       # do not fit the runner's free disk otherwise
       - if: startsWith(matrix.target, 'own')
         run: |

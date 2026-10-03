@@ -82,6 +82,7 @@ class Backend:
     card_note = None  # why a GPU backend's device is not tied to an nvidia-smi card (its work then goes to "cpu")
     variants = None   # kernel variants the library exports (pearl_variants), None when it does not
     variant = None    # the variant asked for by PEARL_VARIANT, None = the library's own choice
+    resident = False  # operands built on the device from job_key and the nonce (job / pass_ / search_resident)
 
     def devices(self) -> list[dict]:
         """[{"id", "name", "pci_bus_id", "sm_count", "nvidia_index"}]; nvidia_index -> nvidia-smi telemetry."""
@@ -140,6 +141,11 @@ class KernelError(RuntimeError):
 _I8P = ctypes.POINTER(ctypes.c_int8)
 _U8P = ctypes.POINTER(ctypes.c_uint8)
 _U32P = ctypes.POINTER(ctypes.c_uint32)
+RESIDENT_EXPORTS = ("pearl_job", "pearl_pass", "pearl_tree_nodes", "pearl_search_resident")
+
+
+def _u8(b: bytes):
+    return (ctypes.c_uint8 * len(b)).from_buffer_copy(b)
 
 
 def pinned_card(env=os.environ) -> tuple[int | None, str | None]:
@@ -237,6 +243,58 @@ class SoBackend(Backend):
                 if rc != 0:
                     raise self._error(f"pearl_set_variant({want!r}) returned {rc}", rc)
         self.variant = want
+        self.resident = all(hasattr(self.lib, f) for f in RESIDENT_EXPORTS)
+        if self.resident:
+            lib = self.lib
+            lib.pearl_job.restype = lib.pearl_pass.restype = ctypes.c_int
+            lib.pearl_tree_nodes.restype = lib.pearl_search_resident.restype = ctypes.c_int
+            lib.pearl_job.argtypes = [_U8P, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32, _U8P,
+                                      _U8P, _U8P, _U8P]
+            lib.pearl_pass.argtypes = [_I8P, _U8P, _U8P]
+            lib.pearl_tree_nodes.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_uint64), ctypes.c_uint32, _U8P,
+                                             ctypes.c_uint32, _U32P, _U8P]
+            lib.pearl_search_resident.argtypes = [ctypes.c_uint32, ctypes.c_uint32, _U8P, _U8P, _U8P, _U8P,
+                                                  ctypes.c_uint32, ctypes.c_uint32, ctypes.POINTER(CandT),
+                                                  ctypes.c_uint32, _U32P, ctypes.POINTER(ctypes.c_uint64)]
+
+    # ---- resident path (kernels/common/README.md, TZ_operands_gpu.md): A = B = 0 except the nonce at A[0, 0:8]
+
+    def job(self, jk: bytes, cfg, m: int, n: int) -> tuple[bytes, bytes]:
+        """Trees of B^T = 0 and of A, B' on the device -> (hash_b, seed_b)."""
+        hb, sb = (ctypes.c_uint8 * 32)(), (ctypes.c_uint8 * 32)()
+        rc = self.lib.pearl_job(_u8(jk), m, n, cfg.k, cfg.r, _u8(cfg.rows.to_bytes()), _u8(cfg.cols.to_bytes()), hb, sb)
+        if rc != 0:
+            raise self._error(f"pearl_job returned {rc}", rc)
+        return bytes(hb), bytes(sb)
+
+    def pass_(self, nonce: np.ndarray) -> tuple[bytes, bytes]:
+        """The nonce (8 int8 in [-64, 64]) -> A' on the device -> (hash_a, seed_a)."""
+        nonce = np.ascontiguousarray(nonce, dtype=np.int8)
+        ha, sa = (ctypes.c_uint8 * 32)(), (ctypes.c_uint8 * 32)()
+        rc = self.lib.pearl_pass(nonce.ctypes.data_as(_I8P), ha, sa)
+        if rc != 0:
+            raise self._error(f"pearl_pass returned {rc}", rc)
+        return bytes(ha), bytes(sa)
+
+    def search_resident(self, cfg, seed_a: bytes, bound: int, lo: int, hi: int, col_tiles: int) -> SearchResult:
+        count, macs = ctypes.c_uint32(0), ctypes.c_uint64(0)
+        rc = self.lib.pearl_search_resident(cfg.k, cfg.r, _u8(cfg.rows.to_bytes()), _u8(cfg.cols.to_bytes()),
+                                            _u8(seed_a), _u8(bound.to_bytes(32, "little")), lo, hi, self._out,
+                                            self.cap, ctypes.byref(count), ctypes.byref(macs))
+        if rc != 0:
+            raise self._error(f"pearl_search_resident returned {rc} (row tiles [{lo}, {hi}))", rc)
+        return self._result(cfg, lo, hi, col_tiles, count.value, macs.value)
+
+    def tree_nodes(self, matrix: int, leaves: list[int]) -> tuple[list[bytes], bytes]:
+        """Siblings (Tree.multiproof order) and root of A (matrix 0, the current pass) or B^T (1, the job)."""
+        cap = 64 * (len(leaves) + 64)
+        idx = (ctypes.c_uint64 * len(leaves))(*leaves)
+        out, cnt, root = (ctypes.c_uint8 * (32 * cap))(), ctypes.c_uint32(0), (ctypes.c_uint8 * 32)()
+        rc = self.lib.pearl_tree_nodes(matrix, idx, len(leaves), out, cap, ctypes.byref(cnt), root)
+        if rc != 0:
+            raise self._error(f"pearl_tree_nodes returned {rc}", rc)
+        raw = bytes(out)
+        return [raw[32 * i:32 * (i + 1)] for i in range(cnt.value)], bytes(root)
 
     def _error(self, msg, rc):
         if self._last_error is not None:
@@ -256,20 +314,21 @@ class SoBackend(Backend):
             if x.dtype != np.int8 or not x.flags.c_contiguous:
                 raise ValueError(f"{name} must be C-contiguous int8")
         cfg = ops.cfg
-        u8 = lambda b: (ctypes.c_uint8 * len(b)).from_buffer_copy(b)
         count, macs = ctypes.c_uint32(0), ctypes.c_uint64(0)
         rc = self._search(a.ctypes.data_as(_I8P), ops.m, bt.ctypes.data_as(_I8P), ops.n, cfg.k, cfg.r,
-                          u8(cfg.rows.to_bytes()), u8(cfg.cols.to_bytes()), u8(ops.seed_a),
-                          u8(ops.bound.to_bytes(32, "little")), lo, hi, self._out, self.cap,
+                          _u8(cfg.rows.to_bytes()), _u8(cfg.cols.to_bytes()), _u8(ops.seed_a),
+                          _u8(ops.bound.to_bytes(32, "little")), lo, hi, self._out, self.cap,
                           ctypes.byref(count), ctypes.byref(macs))
         if rc != 0:
             raise self._error(f"pearl_search returned {rc} (row tiles [{lo}, {hi}))", rc)
-        col_tiles = len(ops.col_part)
+        return self._result(cfg, lo, hi, len(ops.col_part), count.value, macs.value)
+
+    def _result(self, cfg, lo, hi, col_tiles, count, macs) -> SearchResult:
         want_macs = (hi - lo) * col_tiles * cfg.h * cfg.w * cfg.L
-        if macs.value != want_macs:
-            raise KernelError(f"pearl_search reported {macs.value} MAC, the contract says {want_macs}")
-        got = min(count.value, self.cap)
-        res = SearchResult(macs=macs.value, dropped=count.value - got)
+        if macs != want_macs:
+            raise KernelError(f"the kernel reported {macs} MAC, the contract says {want_macs}")
+        got = min(count, self.cap)
+        res = SearchResult(macs=macs, dropped=count - got)
         for c in self._out[:got]:
             if not (lo <= c.row_tile < hi and c.col_tile < col_tiles):
                 raise KernelError(f"candidate tile ({c.row_tile}, {c.col_tile}) outside [{lo}, {hi}) x {col_tiles}")

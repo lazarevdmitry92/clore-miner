@@ -8,6 +8,7 @@
 #include <random>
 #include <string>
 #include <vector>
+#include "../common/host_core.h"
 #include "pearl_api.h"
 
 namespace pearl {
@@ -64,15 +65,6 @@ inline void ref_transcripts(const int8_t *a, const int8_t *bt, const Dims &d, ui
         }
 }
 
-inline void words_le(const uint8_t *b, uint32_t *w, int n) {
-    for (int i = 0; i < n; ++i) w[i] = b[4 * i] | b[4 * i + 1] << 8 | b[4 * i + 2] << 16 | (uint32_t)b[4 * i + 3] << 24;
-}
-
-inline void jackpot_bytes(const uint32_t h[8], uint8_t out[32]) {
-    for (int i = 0; i < 8; ++i)
-        for (int b = 0; b < 4; ++b) out[4 * i + b] = (uint8_t)(h[i] >> (8 * b));
-}
-
 // max over rows of the squared L2 norm (first L elements are all that is ever summed; k is conservative)
 inline uint32_t max_row_sumsq(const int8_t *x, uint32_t rows, uint32_t k) {
     uint32_t best = 0;
@@ -87,24 +79,5 @@ inline uint32_t max_row_sumsq(const int8_t *x, uint32_t rows, uint32_t k) {
 // Every partial sum of a.b (any subset of terms, any order) is bounded by |a||b| (Cauchy-Schwarz); below 2^22 the
 // biased fp32 accumulator 1.5*2^23 + S never leaves [2^23, 2^24) and holds S exactly.
 inline bool cs_exact(uint32_t max_a2, uint32_t max_b2) { return (uint64_t)max_a2 * max_b2 < (1ull << 44); }
-
-inline void sort_cands(cand_t *c, uint32_t n) {
-    std::sort(c, c + n, [](const cand_t &x, const cand_t &y) {
-        return x.row_tile != y.row_tile ? x.row_tile < y.row_tile : x.col_tile < y.col_tile;
-    });
-}
-
-// Pearl-like operands: dist 0 = noise E_L[p] - E_L[q], E_L uniform [-32, 31] (triangular [-63, 63], what the miner
-// feeds with A = B = 0); 1 = uniform [-127, 127]; 2 = only +-127.
-inline std::vector<int8_t> synth(size_t count, int dist, uint32_t seed) {
-    std::mt19937 g(seed);
-    std::vector<int8_t> v(count);
-    for (auto &x : v) {
-        if (dist == 0) x = (int8_t)(((int)(g() & 63) - 32) - ((int)(g() & 63) - 32));
-        else if (dist == 1) x = (int8_t)((int)(g() % 255) - 127);
-        else x = (g() & 1) ? 127 : -127;
-    }
-    return v;
-}
 
 }  // namespace pearl

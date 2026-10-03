@@ -10,6 +10,10 @@ Nonces: pass i of a job is nonce lane + lanes * (base + i), base random per job 
 the servers on one header (HM sends every connection the same template) never redo each other's passes. A = B = 0 (plus the nonce) by default; values stay in [-64, 64].
 The mining thread only queues candidates; the submit thread builds PlainProof (Merkle tree of B^T once per job,
 of A once per pass), verifies it against the exact share target and submits.
+Resident path (a backend with pearl_job / pearl_pass, A = B = 0; kernels/common/README.md, TZ_operands_gpu.md): the
+operands are built on the card -- per job the backend gets job_key and returns hash_b, seed_B; per pass it gets the
+nonce and returns hash_a, seed_A; nothing of size m*k is made on the host. The Merkle siblings of a candidate's tile
+are taken from the backend in the mining thread right after its search (the next pass rewrites A's tree path).
 """
 import collections
 import logging
@@ -59,11 +63,11 @@ class JobWork:
     job: Job
     cfg: R.Config
     jk: bytes
-    B: np.ndarray        # int8 (k, n)
-    Bt: np.ndarray       # int8 (n, k)
+    B: np.ndarray | None          # int8 (k, n); None on the resident path (B = 0 lives on the card)
+    Bt: np.ndarray | None         # int8 (n, k)
     hb: bytes
     seed_b: bytes
-    bt_noised: np.ndarray
+    bt_noised: np.ndarray | None
     target: int          # exact share target (a pool target need not have a compact form)
     bound: int
     bt_tree: R.Tree | None = None   # built by the submit thread at the job's first candidate
@@ -72,9 +76,11 @@ class JobWork:
 @dataclass
 class PassWork:
     jw: JobWork
-    A: np.ndarray
-    ops: Operands
+    A: np.ndarray | None            # None on the resident path
+    ops: Operands | None            # None on the resident path
     a_tree: R.Tree | None = None    # built by the submit thread at the pass's first candidate
+    nonce: np.ndarray | None = None  # resident path: A[0, :8]
+    seed_a: bytes | None = None      # resident path: the pass's jackpot key
 
 
 class Stats:
@@ -141,6 +147,7 @@ class Miner:
         self._shares: queue.Queue = queue.Queue()
         self._stop = threading.Event()
         self._ids = 0
+        self.resident = bool(getattr(backend, "resident", False)) and matrices == "zero"
         self.call_started: float | None = None   # monotonic start of the backend call in flight (the stall watchdog)
         self.calls = 0                            # backend calls returned
 
@@ -186,6 +193,11 @@ class Miner:
     def prepare_job(self, job: Job) -> JobWork:
         cfg, k = self.cfg, self.cfg.k
         jk = R.job_key(job.header, cfg)
+        target = self.share_target(job)
+        bound = min(target * cfg.h * cfg.w * cfg.L, R.U256_MAX)
+        if self.resident:
+            hb, seed_b = self.backend.job(jk, cfg, self.m, self.n)
+            return JobWork(job, cfg, jk, None, None, hb, seed_b, None, target, bound)
         if self.matrices == "random":
             B = self.rng.integers(-64, 65, (k, self.n), dtype=np.int8)
         else:
@@ -197,12 +209,14 @@ class Miner:
         pb, qb = R.sparse_factor(seed_b, R.LABEL_B, k, cfg.r)
         e_brt = R.uniform_factor(seed_b, R.LABEL_B, np.arange(self.n), cfg.r)
         bt_noised = (Bt.astype(np.int16) + e_brt[:, pb] - e_brt[:, qb]).astype(np.int8)
-        target = self.share_target(job)
-        bound = min(target * cfg.h * cfg.w * cfg.L, R.U256_MAX)
         return JobWork(job, cfg, jk, B, Bt, hb, seed_b, bt_noised, target, bound)
 
     def prepare_pass(self, jw: JobWork, nonce: int, b_id: int):
         cfg, k = self.cfg, self.cfg.k
+        if self.resident:
+            digits = nonce_digits(nonce)
+            _, seed_a = self.backend.pass_(digits)
+            return PassWork(jw, None, None, nonce=digits, seed_a=seed_a)
         if self.matrices == "random":
             A = self.rng.integers(-64, 65, (self.m, k), dtype=np.int8)
         else:
@@ -239,13 +253,17 @@ class Miner:
             self._run_pass(pw)
 
     def _run_pass(self, pw: PassWork):
-        total = pw.ops.row_tiles
+        total = len(self.row_part)
         for lo in range(0, total, self.portion_tiles):
             if self._stop.is_set() or self.latest() is not pw.jw.job:
                 return
+            hi = min(lo + self.portion_tiles, total)
             self.call_started = time.monotonic()
             try:
-                res = self.backend.search(pw.ops, lo, min(lo + self.portion_tiles, total))
+                if self.resident:
+                    res = self.backend.search_resident(self.cfg, pw.seed_a, pw.jw.bound, lo, hi, len(self.col_part))
+                else:
+                    res = self.backend.search(pw.ops, lo, hi)
             finally:
                 self.call_started = None
             self.calls += 1
@@ -263,7 +281,8 @@ class Miner:
             self.stats.count("stale")
             log.info("share of job %s dropped: height changed", pw.jw.job.job_id)
             return
-        self._shares.put((pw, cand, device))
+        parts = self.resident_proofs(pw, cand) if self.resident else None
+        self._shares.put((pw, cand, device, parts))
 
     # ------------------------------------------------------------------ submit thread
 
@@ -274,7 +293,25 @@ class Miner:
                 return
             self.handle_share(*item)
 
-    def build_proof(self, pw: PassWork, cand: Candidate) -> R.PlainProof:
+    def resident_proofs(self, pw: PassWork, cand: Candidate) -> tuple[R.MatrixProof, R.MatrixProof]:
+        """Merkle proofs of the tile's rows of A and of B^T from the card's trees (A = 0 + nonce, B = 0)."""
+        k = self.cfg.k
+        out = []
+        for matrix, rows, dim in ((0, self.row_part[cand.row_tile], self.m), (1, self.col_part[cand.col_tile], self.n)):
+            leaves = R.leaf_indices_from_rows(rows, k)
+            sib, root = self.backend.tree_nodes(matrix, leaves)
+            data = []
+            for i in leaves:
+                chunk = bytearray(R.CHUNK)
+                if matrix == 0 and i == 0:
+                    chunk[:NONCE_DIGITS] = pw.nonce.astype(np.int8).tobytes()
+                data.append(bytes(chunk))
+            out.append(R.MatrixProof(data, leaves, -(-dim * k // R.CHUNK), root, sib, [int(x) for x in rows]))
+        return out[0], out[1]
+
+    def build_proof(self, pw: PassWork, cand: Candidate, parts=None) -> R.PlainProof:
+        if parts is not None:
+            return R.PlainProof(self.m, self.n, self.cfg.k, self.cfg.r, parts[0], parts[1])
         jw, k = pw.jw, self.cfg.k
         if jw.bt_tree is None:
             jw.bt_tree = R.matrix_tree(jw.Bt, jw.jk)
@@ -283,13 +320,13 @@ class Miner:
         return R.PlainProof(self.m, self.n, k, self.cfg.r, R.tree_proof(pw.a_tree, self.row_part[cand.row_tile], k),
                             R.tree_proof(jw.bt_tree, self.col_part[cand.col_tile], k))
 
-    def handle_share(self, pw: PassWork, cand: Candidate, device: int):
+    def handle_share(self, pw: PassWork, cand: Candidate, device: int, parts=None):
         job = pw.jw.job
         if self.is_stale(job):
             self.stats.count("stale")
             log.info("share of job %s dropped before proof: height changed", job.job_id)
             return
-        proof = self.build_proof(pw, cand)
+        proof = self.build_proof(pw, cand, parts)
         ok, msg = R.verify(job.header, proof, target_override=pw.jw.target)
         if not ok:
             self.stats.compute_error(device)
