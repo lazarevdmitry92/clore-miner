@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-: "${MINER:?MINER is required: srb-peak, srb, peak, krig, forge, bz, rg, fl4sh, or the -diag form of one}"
+: "${MINER:?MINER is required: srb-peak, srb, peak, krig, forge, bz, rg, fl4sh, qp, own, or the -diag form of one}"
 
 if [ "$MINER" = "peak-diag" ]; then
   echo "=== --version ==="
@@ -44,6 +44,11 @@ if [ "$MINER" = "srb-diag" ]; then
   while true; do sleep 300; done
 fi
 
+# own knows its pool: HeroMiners' TLS door unless the order names another.
+if [ "$MINER" = "own" ]; then
+  : "${POOL:=stratum+ssl://pearl.herominers.com:1200}"
+fi
+
 : "${POOL:?POOL is required, e.g. prl-eu.kryptex.network:7048 (krig needs the SSL port, 8048)}"
 : "${WALLET:?WALLET is required: the Kryptex account login or a Pearl address (prl1...) to be paid at}"
 : "${WORKER:?WORKER is required, e.g. c110598}"
@@ -67,8 +72,10 @@ busybox httpd -p 21559 -h /var/log || echo "log server did not start: $?" >> /va
 
 # Can the host reach the pool at all: a host that firewalls the pool port (`Socket error 113`, 112640) answers here in
 # the first minute -- ok, timeout, or the system's own words (refused, no route to host).
-pool_host="${POOL%:*}"
-pool_port="${POOL##*:}"
+# POOL may carry a scheme (own, qp): the check wants only host:port.
+pool_addr="${POOL#*://}"
+pool_host="${pool_addr%:*}"
+pool_port="${pool_addr##*:}"
 {
   printf -- "--- pool %s:%s tcp ---\n" "$pool_host" "$pool_port"
   if out=$(timeout 5 bash -c "exec 3<>/dev/tcp/$pool_host/$pool_port" 2>&1); then
@@ -186,8 +193,20 @@ case "$MINER" in
     set -- /usr/local/bin/quanpool-miner serve --node-addr "$POOL" --auth-token "$WALLET.$WORKER" --cpu-workers 0 \
       ${MINER_FLAGS:-}
     ;;
+  own)
+    # Our own miner (Python, /opt/own): POOL as host:port gets the TLS scheme, the only one HM speaks to it. DRY_RUN=1
+    # (the default until a GPU kernel exists) builds and checks shares but never submits them. -u keeps its log flowing
+    # line by line through tee; the pool's raw exchange goes to /var/log/own/, read through the log port.
+    case "$POOL" in
+      *://*) pool_url="$POOL" ;;
+      *) pool_url="stratum+ssl://$POOL" ;;
+    esac
+    set -- /opt/own/venv/bin/python -u -m miner.main --pool "$pool_url" --wallet "$WALLET" --worker "$WORKER" \
+      --backend "${BACKEND:-cpu-ref}" --api-port 21550 --log-dir /var/log/own ${MINER_FLAGS:-}
+    if [ "${DRY_RUN:-1}" != "0" ]; then set -- "$@" --dry-run; fi
+    ;;
   *)
-    echo "unknown MINER '$MINER': expected srb-peak, srb, peak, krig, forge, bz, rg, fl4sh or qp" >&2
+    echo "unknown MINER '$MINER': expected srb-peak, srb, peak, krig, forge, bz, rg, fl4sh, qp or own" >&2
     exit 64
     ;;
 esac

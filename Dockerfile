@@ -1,6 +1,6 @@
 # One image per miner, so nothing can start the wrong one and neither image pays for the other's binary -- except srb-peak,
 # the fleet's image: SRBMiner, and PeakMiner where SRBMiner's dev fee is blocked (entrypoint.sh).
-# Built with one `--target` per miner (see .github/workflows/build.yml): srb-peak, srb, peak, krig, forge, bz, rg, fl4sh, qp.
+# Built with one `--target` per miner (see .github/workflows/build.yml): srb-peak, srb, peak, krig, forge, bz, rg, fl4sh, qp, own.
 # WildRig had a
 # fourth target until 21.09: Kryptex does not speak Stratum v1 at all, so a miner written for it has nothing
 # to assemble here (FACTS.md, "Пул и майнер").
@@ -130,3 +130,20 @@ RUN curl -fsSL "https://download.quanpool.com/quanpool-miner-${QP_VERSION}-linux
  && echo "${QP_SHA256}  /usr/local/bin/quanpool-miner" | sha256sum -c - \
  && chmod +x /usr/local/bin/quanpool-miner \
  && quanpool-miner --help 2>&1 | grep -qi serve
+
+# own: our own Pearl miner (host side in Python; pilots/miner/builds, outside git -- a copy of its miner/ and ref/ lives
+# in own/). Until a GPU kernel exists the only backend is cpu-ref, and the entrypoint runs it with --dry-run unless
+# DRY_RUN=0, so this image sends nothing to the pool. Ubuntu's python3 refuses a system-wide pip (PEP 668): a venv.
+# The import at the end fails the build here, not on a paid rental, if ref/ or a library is missing.
+FROM base AS own
+ARG NUMPY_VERSION=2.5.3
+ARG BLAKE3_VERSION=1.0.10
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3 python3-venv \
+ && rm -rf /var/lib/apt/lists/* \
+ && python3 -m venv /opt/own/venv \
+ && /opt/own/venv/bin/pip install --no-cache-dir "numpy==${NUMPY_VERSION}" "blake3==${BLAKE3_VERSION}"
+COPY own/ /opt/own/
+ENV PYTHONPATH=/opt/own
+RUN /opt/own/venv/bin/python -c "import miner.main"
+EXPOSE 21550
