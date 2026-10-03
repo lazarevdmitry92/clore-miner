@@ -131,10 +131,19 @@ RUN curl -fsSL "https://download.quanpool.com/quanpool-miner-${QP_VERSION}-linux
  && chmod +x /usr/local/bin/quanpool-miner \
  && quanpool-miner --help 2>&1 | grep -qi serve
 
-# own: our own Pearl miner (host side in Python; pilots/miner/builds, outside git -- a copy of its miner/ and ref/ lives
-# in own/). Until a GPU kernel exists the only backend is cpu-ref, and the entrypoint runs it with --dry-run unless
-# DRY_RUN=0, so this image sends nothing to the pool. Ubuntu's python3 refuses a system-wide pip (PEP 668): a venv.
-# The import at the end fails the build here, not on a paid rental, if ref/ or a library is missing.
+# own-kernel: the V100 kernel of the own miner (own/kernels/v100, sm_70) built with nvcc -- CUDA 12.6 still targets
+# Volta. The Makefile links cudart statically and bench.cu opens NVML with dlopen, so the two files need only the
+# driver's libcuda.so.1, which the host's NVIDIA runtime brings. `make ptxas` prints registers and spills of every
+# kernel into the build log.
+FROM nvidia/cuda:12.6.3-devel-ubuntu24.04 AS own-kernel
+COPY own/kernels/v100/ /src/v100/
+RUN cd /src/v100 && make && make ptxas
+
+# own: our own Pearl miner (host side in Python; pilots/miner/builds, outside git -- a copy of its miner/, ref/,
+# acceptance/accept.py and the kernel sources lives in own/). The entrypoint runs it with --dry-run unless DRY_RUN=0,
+# so this image sends nothing to the pool by default; MINER=own-idle starts no miner at all (a container to bench the
+# kernel over ssh). Ubuntu's python3 refuses a system-wide pip (PEP 668): a venv. The checks at the end fail the build
+# here, not on a paid rental: the import of the miner, and every library of the kernel found but the driver's.
 FROM base AS own
 ARG NUMPY_VERSION=2.5.3
 ARG BLAKE3_VERSION=1.0.10
@@ -144,6 +153,11 @@ RUN apt-get update \
  && python3 -m venv /opt/own/venv \
  && /opt/own/venv/bin/pip install --no-cache-dir "numpy==${NUMPY_VERSION}" "blake3==${BLAKE3_VERSION}"
 COPY own/ /opt/own/
+COPY --from=own-kernel /src/v100/build/libpearl_v100.so /src/v100/build/pearl_bench /opt/own/kernels/v100/
 ENV PYTHONPATH=/opt/own
-RUN /opt/own/venv/bin/python -c "import miner.main"
+RUN cd /opt/own && /opt/own/venv/bin/python -c "import miner.main" \
+ && for f in /opt/own/kernels/v100/libpearl_v100.so /opt/own/kernels/v100/pearl_bench; do \
+      ldd "$f"; \
+      if ldd "$f" | grep "not found" | grep -v "libcuda\.so\.1"; then echo "$f: missing libraries" >&2; exit 1; fi; \
+    done
 EXPOSE 21550

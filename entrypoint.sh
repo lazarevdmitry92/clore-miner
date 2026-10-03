@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-: "${MINER:?MINER is required: srb-peak, srb, peak, krig, forge, bz, rg, fl4sh, qp, own, or the -diag form of one}"
+: "${MINER:?MINER is required: srb-peak, srb, peak, krig, forge, bz, rg, fl4sh, qp, own, own-idle, or the -diag form of one}"
 
 if [ "$MINER" = "peak-diag" ]; then
   echo "=== --version ==="
@@ -41,6 +41,17 @@ if [ "$MINER" = "srb-diag" ]; then
     done
   } > /var/log/miner.log 2>&1
   echo "диагностика записана в /var/log/miner.log; контейнер остаётся жив для чтения"
+  while true; do sleep 300; done
+fi
+
+# own-idle: the own image with no miner -- the log port and a live container for a bench of the kernel over ssh
+# (pearl_bench, acceptance/accept.py in /opt/own); nothing reaches a pool, so POOL, WALLET and WORKER are not needed.
+if [ "$MINER" = "own-idle" ]; then
+  {
+    echo "=== $(date -u +%FT%TZ) miner=own-idle: no miner, the container waits ==="
+    nvidia-smi --query-gpu=index,name,pci.bus_id,driver_version,power.limit --format=csv 2>&1 || echo "nvidia-smi failed: $?"
+  } > /var/log/startup.log 2>&1
+  busybox httpd -p 21559 -h /var/log || echo "log server did not start: $?" >> /var/log/startup.log
   while true; do sleep 300; done
 fi
 
