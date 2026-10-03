@@ -140,11 +140,22 @@ FROM nvidia/cuda:12.6.3-devel-ubuntu24.04 AS own-kernel
 COPY own/kernels/v100/ /src/v100/
 RUN cd /src/v100 && make && make ptxas
 
+# own-soat: the temporary kernel of sm_80/86/89/120 cards -- our pearl_search wrapper (own/kernels/soat, from
+# pilots/miner/builds/soat_backend) over the SOAT kernels included unchanged (blindrun/soat-miner 48defc8, MIT: its
+# LICENSE beside the four headers in soat-48defc8/). `make fat` puts SASS for all four and PTX compute_120 in one .so;
+# sm_120 needs CUDA >= 12.8, hence its own stage. cudart is static, as with v100: only the driver's libcuda.so.1 stays.
+FROM nvidia/cuda:12.8.1-devel-ubuntu24.04 AS own-soat
+COPY own/kernels/soat/ /src/soat/
+RUN cd /src/soat && make fat SOAT=soat-48defc8
+
 # own: our own Pearl miner (host side in Python; pilots/miner/builds, outside git -- a copy of its miner/, ref/,
-# acceptance/accept.py and the kernel sources lives in own/). The entrypoint runs it with --dry-run unless DRY_RUN=0,
-# so this image sends nothing to the pool by default; MINER=own-idle starts no miner at all (a container to bench the
-# kernel over ssh). Ubuntu's python3 refuses a system-wide pip (PEP 668): a venv. The checks at the end fail the build
-# here, not on a paid rental: the import of the miner, and every library of the kernel found but the driver's.
+# acceptance/accept.py and the kernel sources lives in own/). The entrypoint runs its supervisor on every card
+# (--all-gpus): each card gets the kernel of its compute capability from /opt/own/kernels (miner/registry.py) --
+# libpearl_v100.so for sm_70, libpearl_soat.so for sm_80 and up; the v100 bench keeps its files in kernels/v100/. It
+# runs with --dry-run unless DRY_RUN=0, so this image sends nothing to the pool by default; MINER=own-idle starts no
+# miner at all (a container to bench the kernel over ssh). Ubuntu's python3 refuses a system-wide pip (PEP 668): a
+# venv. The checks at the end fail the build here, not on a paid rental: the import of the miner and its supervisor,
+# and every library of the kernels found but the driver's.
 FROM base AS own
 ARG NUMPY_VERSION=2.5.3
 ARG BLAKE3_VERSION=1.0.10
@@ -155,9 +166,11 @@ RUN apt-get update \
  && /opt/own/venv/bin/pip install --no-cache-dir "numpy==${NUMPY_VERSION}" "blake3==${BLAKE3_VERSION}"
 COPY own/ /opt/own/
 COPY --from=own-kernel /src/v100/build/libpearl_v100.so /src/v100/build/pearl_bench /opt/own/kernels/v100/
+COPY --from=own-soat /src/soat/libpearl_soat.so /opt/own/kernels/
 ENV PYTHONPATH=/opt/own
-RUN cd /opt/own && /opt/own/venv/bin/python -c "import miner.main" \
- && for f in /opt/own/kernels/v100/libpearl_v100.so /opt/own/kernels/v100/pearl_bench; do \
+RUN cd /opt/own && ln -s v100/libpearl_v100.so /opt/own/kernels/libpearl_v100.so \
+ && /opt/own/venv/bin/python -c "import miner.main, miner.supervisor" \
+ && for f in /opt/own/kernels/libpearl_v100.so /opt/own/kernels/v100/pearl_bench /opt/own/kernels/libpearl_soat.so; do \
       ldd "$f"; \
       if ldd "$f" | grep "not found" | grep -v "libcuda\.so\.1"; then echo "$f: missing libraries" >&2; exit 1; fi; \
     done
