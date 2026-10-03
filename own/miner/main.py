@@ -15,8 +15,8 @@ from pathlib import Path
 
 from . import VERSION
 from .api import Telemetry, serve, summary
-from .jobs import Miner, Stats
-from .kernel import BACKENDS, Backend, make_backend
+from .jobs import TILES, Miner, Stats
+from .kernel import BACKENDS, SO_PREFIX, Backend, is_backend_name, make_backend
 from .pool import IDLE_TIMEOUT, TLS_NAME, Pool
 
 log = logging.getLogger("main")
@@ -31,6 +31,12 @@ def positive(cast):
     return parse
 
 
+def backend_name(s):
+    if is_backend_name(s):
+        return s
+    raise argparse.ArgumentTypeError(f"unknown backend {s!r}; known: {', '.join(BACKENDS)}, {SO_PREFIX}<path>")
+
+
 def parse_args(argv=None):
     p = argparse.ArgumentParser(prog="miner", description=f"own Pearl miner {VERSION}")
     p.add_argument("--pool", default="stratum+ssl://pearl.herominers.com:1200",
@@ -38,7 +44,8 @@ def parse_args(argv=None):
     p.add_argument("--tls-name", default=TLS_NAME, help="certificate name to check (HM: pearl.herominers.com)")
     p.add_argument("--wallet", required=True)
     p.add_argument("--worker", default="own")
-    p.add_argument("--backend", default="cpu-ref", choices=sorted(BACKENDS))
+    p.add_argument("--backend", default="cpu-ref", type=backend_name,
+                   help=f"{' | '.join(BACKENDS)} | {SO_PREFIX}/path/lib.so (a kernel library over ctypes)")
     p.add_argument("--api-port", type=int, default=21550, help="0 = any free port")
     p.add_argument("--api-host", default="0.0.0.0")
     p.add_argument("--dry-run", action="store_true", help="never submit: log a verified share instead")
@@ -47,6 +54,10 @@ def parse_args(argv=None):
     p.add_argument("--idle-timeout", type=positive(float), default=IDLE_TIMEOUT,
                    help="s without a line from the pool before reconnecting (HM sends a job every ~35 s)")
     p.add_argument("--k", type=int, default=2048)
+    p.add_argument("--tile", choices=list(TILES), default="8x16",
+                   help="hash tile: 8x16 (s0 §6), 16x16 contiguous (the SOAT kernel, soat_backend/; "
+                        "--portion-rows and --n multiples of 256 run without padding) or v100 (kernels/v100: "
+                        "m8n8k4 rows period 32, cols period 64)")
     p.add_argument("--m", type=int, default=1024)
     p.add_argument("--n", type=int, default=1024)
     p.add_argument("--portion-rows", type=positive(int), default=256)
@@ -110,7 +121,7 @@ def build(args) -> App:
     stats = Stats(backend.devices())
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S")
     miner = Miner(backend, None, stats, k=args.k, m=args.m, n=args.n, portion_rows=args.portion_rows,
-                  matrices=args.matrices, nbits_override=args.nbits_override, dry_run=args.dry_run)
+                  matrices=args.matrices, nbits_override=args.nbits_override, dry_run=args.dry_run, tile=args.tile)
     pool = Pool(args.pool, args.wallet, args.worker, miner.on_job, args.log_dir / f"pool-{stamp}.jsonl",
                 tls_name=args.tls_name, idle_timeout=args.idle_timeout)
     miner.pool = pool
@@ -127,8 +138,8 @@ def main(argv=None):
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     app = build(args)
-    log.info("miner %s backend %s dry_run=%s api :%d k=%d m=%d n=%d", VERSION, app.backend.name, args.dry_run,
-             app.srv.server_address[1], args.k, args.m, args.n)
+    log.info("miner %s backend %s dry_run=%s api :%d k=%d m=%d n=%d tile %s", VERSION, app.backend.name,
+             args.dry_run, app.srv.server_address[1], args.k, args.m, args.n, args.tile)
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     signal.signal(signal.SIGINT, lambda *_: stop.set())

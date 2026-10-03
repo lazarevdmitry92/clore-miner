@@ -24,7 +24,10 @@ Tile numbering = Pattern.partition order: tile t has offset = t-th valid offset,
 the partition is computed once by the miner and travels in Operands (row_part, col_part).
 Operands may stay resident: a_id / b_id change only when A' / B'^T change (B' is fixed for a job).
 """
+import ctypes
+import os
 from dataclasses import dataclass, field
+from pathlib import Path
 import platform
 
 import numpy as np
@@ -76,6 +79,7 @@ class Backend:
     name = "abstract"
     kernel = "none"
     cap = 16  # candidates per search call; more are counted in SearchResult.dropped (a hit is ~2^-34 per tile)
+    card_note = None  # why a GPU backend's device is not tied to an nvidia-smi card (its work then goes to "cpu")
 
     def devices(self) -> list[dict]:
         """[{"id", "name", "pci_bus_id", "sm_count", "nvidia_index"}]; nvidia_index -> nvidia-smi telemetry."""
@@ -115,10 +119,147 @@ class CpuRefBackend(Backend):
         return res
 
 
+class CandT(ctypes.Structure):
+    _pack_ = 1
+    _fields_ = [("row_tile", ctypes.c_uint32), ("col_tile", ctypes.c_uint32), ("jackpot", ctypes.c_uint8 * 32)]
+
+
+assert ctypes.sizeof(CandT) == 40
+
+
+class KernelError(RuntimeError):
+    """pearl_search returned non-zero, or its output breaks the contract."""
+
+    def __init__(self, msg, code=None):
+        super().__init__(msg)
+        self.code = code
+
+
+_I8P = ctypes.POINTER(ctypes.c_int8)
+_U8P = ctypes.POINTER(ctypes.c_uint8)
+_U32P = ctypes.POINTER(ctypes.c_uint32)
+
+
+def pinned_card(env=os.environ) -> tuple[int | None, str | None]:
+    """The nvidia-smi index of the one card this process runs on: (index, None), or (None, why it is unknown).
+
+    One card per process: CUDA_VISIBLE_DEVICES=i (the library then sees it as device 0) or PEARL_DEVICE=i. CUDA
+    numbers cards fastest-first unless CUDA_DEVICE_ORDER=PCI_BUS_ID, which is the nvidia-smi order -- without it
+    the index points at an unknown card, so it is required (ValueError)."""
+    cvd, dev = env.get("CUDA_VISIBLE_DEVICES"), env.get("PEARL_DEVICE")
+    if cvd is not None:
+        items = [x.strip() for x in cvd.split(",") if x.strip()]
+        if len(items) != 1:
+            return None, f"CUDA_VISIBLE_DEVICES={cvd!r} is not one card"
+        if not items[0].isdigit():
+            return None, f"CUDA_VISIBLE_DEVICES={cvd!r} is not an nvidia-smi index"
+        if dev not in (None, "0"):
+            raise ValueError(f"CUDA_VISIBLE_DEVICES={cvd!r} leaves one device, PEARL_DEVICE={dev!r} must be 0 or unset")
+        index, by = int(items[0]), "CUDA_VISIBLE_DEVICES"
+    elif dev is not None:
+        if not dev.strip().isdigit():
+            raise ValueError(f"PEARL_DEVICE={dev!r} is not a device index")
+        index, by = int(dev), "PEARL_DEVICE"
+    else:
+        return None, "neither CUDA_VISIBLE_DEVICES (one index) nor PEARL_DEVICE is set"
+    if env.get("CUDA_DEVICE_ORDER") != "PCI_BUS_ID":
+        raise ValueError(f"{by}={index} needs CUDA_DEVICE_ORDER=PCI_BUS_ID (the nvidia-smi order), got "
+                         f"{env.get('CUDA_DEVICE_ORDER')!r}")
+    return index, None
+
+
+class SoBackend(Backend):
+    """A kernel in a shared library (README, "Контракт GPU-бэкенда"): pearl_search over ctypes, one device.
+
+    Optional exports: int pearl_device_info(uint32_t *sm_count, char *name, uint32_t name_len) -- 0 = ok;
+    without it sm_count is None and the device is named after the file. const char *pearl_last_error(void) -- the
+    reason of the last non-zero return, added to KernelError; without it the error carries the code only.
+    The device is tied to its nvidia-smi card by pinned_card() (one card per process); otherwise card_note says why
+    not and /summary counts its work under "cpu"."""
+    name = "so"
+
+    def __init__(self, path, cap: int = Backend.cap, env=os.environ):
+        self.path = Path(path).resolve()
+        if not self.path.is_file():
+            raise FileNotFoundError(f"kernel library {self.path} not found")
+        if cap <= 0:
+            raise ValueError(f"cap must be positive, got {cap}")
+        self.lib = ctypes.CDLL(str(self.path))
+        f = self.lib.pearl_search
+        f.restype = ctypes.c_int
+        f.argtypes = [_I8P, ctypes.c_uint32, _I8P, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32,
+                      _U8P, _U8P, _U8P, _U8P, ctypes.c_uint32, ctypes.c_uint32,
+                      ctypes.POINTER(CandT), ctypes.c_uint32, _U32P, ctypes.POINTER(ctypes.c_uint64)]
+        self._search = f
+        self.cap = cap
+        self._out = (CandT * cap)()
+        self.kernel = f"so:{self.path.name}"
+        index, self.card_note = pinned_card(env)
+        self._device = {"id": 0, "name": self.path.name, "pci_bus_id": None, "sm_count": None, "nvidia_index": index}
+        self._last_error = getattr(self.lib, "pearl_last_error", None)
+        if self._last_error is not None:
+            self._last_error.restype = ctypes.c_char_p
+            self._last_error.argtypes = []
+        info = getattr(self.lib, "pearl_device_info", None)
+        if info is not None:
+            info.restype = ctypes.c_int
+            info.argtypes = [_U32P, ctypes.c_char_p, ctypes.c_uint32]
+            sm, buf = ctypes.c_uint32(0), ctypes.create_string_buffer(256)
+            rc = info(ctypes.byref(sm), buf, len(buf))
+            if rc != 0:
+                raise self._error(f"pearl_device_info returned {rc}", rc)
+            self._device.update(name=buf.value.decode("utf-8", "replace"), sm_count=sm.value)
+
+    def _error(self, msg, rc):
+        if self._last_error is not None:
+            text = self._last_error()
+            if text:
+                msg += f": {text.decode('utf-8', 'replace')}"
+        return KernelError(msg, rc)
+
+    def devices(self):
+        return [dict(self._device)]
+
+    def search(self, ops, lo, hi):
+        if not 0 <= lo < hi <= ops.row_tiles:
+            raise ValueError(f"row tiles [{lo}, {hi}) outside [0, {ops.row_tiles})")
+        a, bt = ops.a_noised, ops.bt_noised
+        for name, x in (("a_noised", a), ("bt_noised", bt)):
+            if x.dtype != np.int8 or not x.flags.c_contiguous:
+                raise ValueError(f"{name} must be C-contiguous int8")
+        cfg = ops.cfg
+        u8 = lambda b: (ctypes.c_uint8 * len(b)).from_buffer_copy(b)
+        count, macs = ctypes.c_uint32(0), ctypes.c_uint64(0)
+        rc = self._search(a.ctypes.data_as(_I8P), ops.m, bt.ctypes.data_as(_I8P), ops.n, cfg.k, cfg.r,
+                          u8(cfg.rows.to_bytes()), u8(cfg.cols.to_bytes()), u8(ops.seed_a),
+                          u8(ops.bound.to_bytes(32, "little")), lo, hi, self._out, self.cap,
+                          ctypes.byref(count), ctypes.byref(macs))
+        if rc != 0:
+            raise self._error(f"pearl_search returned {rc} (row tiles [{lo}, {hi}))", rc)
+        col_tiles = len(ops.col_part)
+        want_macs = (hi - lo) * col_tiles * cfg.h * cfg.w * cfg.L
+        if macs.value != want_macs:
+            raise KernelError(f"pearl_search reported {macs.value} MAC, the contract says {want_macs}")
+        got = min(count.value, self.cap)
+        res = SearchResult(macs=macs.value, dropped=count.value - got)
+        for c in self._out[:got]:
+            if not (lo <= c.row_tile < hi and c.col_tile < col_tiles):
+                raise KernelError(f"candidate tile ({c.row_tile}, {c.col_tile}) outside [{lo}, {hi}) x {col_tiles}")
+            res.candidates.append(Candidate(c.row_tile, c.col_tile, bytes(c.jackpot)))
+        return res
+
+
 BACKENDS = {"cpu-ref": CpuRefBackend}
+SO_PREFIX = "so:"      # so:/path/lib.so -> SoBackend
+
+
+def is_backend_name(name: str) -> bool:
+    return name in BACKENDS or (name.startswith(SO_PREFIX) and len(name) > len(SO_PREFIX))
 
 
 def make_backend(name: str) -> Backend:
-    if name not in BACKENDS:
-        raise ValueError(f"unknown backend {name!r}; known: {', '.join(BACKENDS)}")
+    if not is_backend_name(name):
+        raise ValueError(f"unknown backend {name!r}; known: {', '.join(BACKENDS)}, {SO_PREFIX}<path>")
+    if name.startswith(SO_PREFIX):
+        return SoBackend(name[len(SO_PREFIX):])
     return BACKENDS[name]()

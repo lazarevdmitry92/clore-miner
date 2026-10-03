@@ -80,6 +80,9 @@ def summary(miner, pool, stats, backend, telemetry: Telemetry) -> dict:
                      "hashrate": stats.hashrate(d["id"]) if d else 0.0, **n,
                      **{k: c[k] for k in SMI_NUMBERS}, "kernel": backend.kernel if d else None})
     on_cpu = [d for d in devices if d["nvidia_index"] is None]
+    if on_cpu and backend.card_note:
+        error = "; ".join(filter(None, [error, f"backend device not tied to a card ({backend.card_note}): "
+                                               f"its work is under cpu"]))
     cpu = None
     if on_cpu:
         cpu = {"name": ", ".join(d["name"] for d in on_cpu),

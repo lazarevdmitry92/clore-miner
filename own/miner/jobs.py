@@ -1,6 +1,6 @@
 """Job loop: pool job -> operands -> portions of work to the kernel -> share -> own verify -> submit.
 
-Per job (header): MiningConfiguration (r=128, tile 8x16 of s0 §6, k chosen), job_key, B and its root,
+Per job (header): MiningConfiguration (r=128, tile 8x16 of s0 §6 or contiguous 16x16 of SOAT, k chosen), job_key, B and its root,
 seed_B, E_B, B'^T — B' stays fixed for the whole job (s0 §5).
 Per pass (job, nonce): A with the nonce written into its first row, root of A, seed_A, E_A, A'.
 A pass is all tiles of C' = A'·B', split into portions of row tiles for the backend; between portions the loop
@@ -26,11 +26,18 @@ log = logging.getLogger("jobs")
 
 ROWS_8 = [0, 8, 16, 24, 32, 40, 48, 56]                      # s0 §6: warp tile 64x64 of mma.sync m16n8
 COLS_16 = [c + d for c in range(0, 64, 8) for d in (0, 1)]   # [0, 1, 8, 9, ..., 56, 57]
+RANGE_16 = list(range(16))                                    # SOAT: contiguous 16x16, bytes 00 0f 00 00 00 00
+ROWS_V100 = [0, 2, 8, 10, 16, 18, 24, 26]                    # mma.m8n8k4 (Volta): kernels/v100/README.md, п.1
+COLS_V100 = [0, 1, 4, 5, 16, 17, 20, 21, 32, 33, 36, 37, 48, 49, 52, 53]
+TILES = {"8x16": (ROWS_8, COLS_16), "16x16": (RANGE_16, RANGE_16), "v100": (ROWS_V100, COLS_V100)}
 NONCE_DIGITS = 8                                              # base-129 digits in A[0, :8] -> 129^8 passes per job
 
 
-def mining_config(k: int, r: int = 128) -> R.Config:
-    return R.Config(k, r, R.Pattern.from_list(ROWS_8), R.Pattern.from_list(COLS_16))
+def mining_config(k: int, r: int = 128, tile: str = "8x16") -> R.Config:
+    if tile not in TILES:
+        raise ValueError(f"tile {tile!r}; known: {', '.join(TILES)}")
+    rows, cols = TILES[tile]
+    return R.Config(k, r, R.Pattern.from_list(rows), R.Pattern.from_list(cols))
 
 
 def nonce_digits(nonce: int) -> np.ndarray:
@@ -104,8 +111,8 @@ class Stats:
 class Miner:
     def __init__(self, backend: Backend, pool, stats: Stats, k: int = 2048, m: int = 1024, n: int = 1024,
                  portion_rows: int = 256, matrices: str = "zero", nbits_override: int | None = None,
-                 dry_run: bool = False, seed: int = 0):
-        self.cfg = mining_config(k)
+                 dry_run: bool = False, seed: int = 0, tile: str = "8x16"):
+        self.cfg = mining_config(k, tile=tile)
         self.cfg.sanity(m, n)
         for dim, name, per in ((m, "m", self.cfg.rows.period), (n, "n", self.cfg.cols.period)):
             if dim % per:
