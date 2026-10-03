@@ -17,47 +17,52 @@ jobs:
       matrix:
         include:
           - target: srb-peak
-            tags: |
-              ghcr.io/${{ github.repository_owner }}/clore-miner:srb-peak
-              ghcr.io/${{ github.repository_owner }}/clore-miner:srb-peak-${{ github.sha }}
-          - target: srb
-            tags: |
-              ghcr.io/${{ github.repository_owner }}/clore-miner:latest
-              ghcr.io/${{ github.repository_owner }}/clore-miner:${{ github.sha }}
+            float: srb-peak
+            prefix: srb-peak-
+          - target: srb          # the fleet's first image: :latest and the bare sha (ops/clore_orders.IMAGE)
+            float: latest
+            prefix: ""
           - target: peak
-            tags: |
-              ghcr.io/${{ github.repository_owner }}/clore-miner:peak
-              ghcr.io/${{ github.repository_owner }}/clore-miner:peak-${{ github.sha }}
+            float: peak
+            prefix: peak-
           - target: forge
-            tags: |
-              ghcr.io/${{ github.repository_owner }}/clore-miner:forge
-              ghcr.io/${{ github.repository_owner }}/clore-miner:forge-${{ github.sha }}
+            float: forge
+            prefix: forge-
           - target: bz
-            tags: |
-              ghcr.io/${{ github.repository_owner }}/clore-miner:bz
-              ghcr.io/${{ github.repository_owner }}/clore-miner:bz-${{ github.sha }}
+            float: bz
+            prefix: bz-
           - target: rg
-            tags: |
-              ghcr.io/${{ github.repository_owner }}/clore-miner:rg
-              ghcr.io/${{ github.repository_owner }}/clore-miner:rg-${{ github.sha }}
+            float: rg
+            prefix: rg-
           - target: fl4sh
-            tags: |
-              ghcr.io/${{ github.repository_owner }}/clore-miner:fl4sh
-              ghcr.io/${{ github.repository_owner }}/clore-miner:fl4sh-${{ github.sha }}
+            float: fl4sh
+            prefix: fl4sh-
           - target: krig
-            tags: |
-              ghcr.io/${{ github.repository_owner }}/clore-miner:krig
-              ghcr.io/${{ github.repository_owner }}/clore-miner:krig-${{ github.sha }}
+            float: krig
+            prefix: krig-
           - target: qp
-            tags: |
-              ghcr.io/${{ github.repository_owner }}/clore-miner:qp
-              ghcr.io/${{ github.repository_owner }}/clore-miner:qp-${{ github.sha }}
+            float: qp
+            prefix: qp-
           - target: own
-            tags: |
-              ghcr.io/${{ github.repository_owner }}/clore-miner:own
-              ghcr.io/${{ github.repository_owner }}/clore-miner:own-${{ github.sha }}
+            float: own
+            prefix: own-
     steps:
       - uses: actions/checkout@v4
+      # The floating tag (:latest, :<target>) is what an unpinned order pulls: only the image branch moves it. Any other
+      # branch publishes the pinned <target>-<sha> alone, so a trial build never replaces what the fleet may run.
+      - id: tags
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/clore-miner
+          PINNED: ${{ matrix.prefix }}${{ github.sha }}
+          FLOAT: ${{ matrix.float }}
+        run: |
+          tags="$IMAGE:$PINNED"
+          if [ "$GITHUB_REF" = refs/heads/image ]; then tags="$tags,$IMAGE:$FLOAT"; fi
+          echo "tags: $tags"
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
+      # the CUDA devel stage of own (nvidia/cuda ~8 GB unpacked) does not fit the runner's free disk otherwise
+      - if: matrix.target == 'own'
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -69,4 +74,4 @@ jobs:
           target: ${{ matrix.target }}
           platforms: linux/amd64
           push: true
-          tags: ${{ matrix.tags }}
+          tags: ${{ steps.tags.outputs.tags }}
