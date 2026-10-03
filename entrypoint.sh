@@ -69,8 +69,7 @@ busybox httpd -p 21559 -h /var/log || echo "log server did not start: $?" >> /va
 # the first minute -- ok, timeout, or the system's own words (refused, no route to host).
 pool_host="${POOL%:*}"
 pool_port="${POOL##*:}"
-{
-  printf -- "--- pool %s:%s tcp ---\n" "$pool_host" "$pool_port"
+pool_tcp() {
   if out=$(timeout 5 bash -c "exec 3<>/dev/tcp/$pool_host/$pool_port" 2>&1); then
     echo ok
   elif [ $? -eq 124 ]; then
@@ -78,10 +77,17 @@ pool_port="${POOL##*:}"
   else
     echo "failed: $out"
   fi
+}
+{
+  printf -- "--- pool %s:%s tcp ---\n" "$pool_host" "$pool_port"
+  pool_tcp
 } >> /var/log/startup.log 2>&1
 
 # srb-peak: SRBMiner first; when its dev fee is blocked (RU/UA hosts: `Devfee related operations were blocked`, then it
-# exits) twice in a row, PeakMiner on the same pool, worker and API port, for good. PeakMiner failing with CUDA_700 three
+# exits) twice in a row, PeakMiner on the same pool, worker and API port, for good. A run counts as blocked only while
+# our own pool answers: SRBMiner says the same words when it reaches no pool at all, and on 03.10 a host that refused the
+# pool's port (51787) sent the container to PeakMiner, which then reported 412 TH/s off the pool. With the pool refused
+# the fee is not the matter -- SRBMiner starts again, and the monitor judges the way to the pool (drop_pool_blocked). PeakMiner failing with CUDA_700 three
 # times in a row (RTX 5070 Ti on driver 615) leaves the container idle: the monitor sees no miner and drops the order.
 # The choice is in /var/log/miner.choice, read through the log port; the API answer itself names the miner too.
 if [ "$MINER" = "srb-peak" ]; then
@@ -101,7 +107,13 @@ if [ "$MINER" = "srb-peak" ]; then
       --wallet "$WALLET.$WORKER" --api-enable --api-port 21550 --log-file /var/log/srb.log ${MINER_FLAGS:-} \
       >> /var/log/miner.log 2>&1 || true
     if grep -q "Devfee related operations were blocked" /var/log/srb.log 2>/dev/null; then
-      blocked=$((blocked + 1))
+      pool=$(pool_tcp)
+      if [ "$pool" = ok ]; then
+        blocked=$((blocked + 1))
+      else
+        blocked=0
+        echo "$(date -u +%FT%TZ) dev fee 'blocked', but our pool $pool_host:$pool_port too ($pool): not the fee" >> /var/log/miner.log
+      fi
     else
       blocked=0
     fi
@@ -176,12 +188,18 @@ case "$MINER" in
     # Kryptex's own miner: no dev fee, TLS-only stratum (POOL must be the SSL port), and the worker goes after a
     # slash, not a dot. --no-rocm skips the AMD probe on a fleet that is all NVIDIA.
     # 4070 is deliberately not in sources/fleet.MINER_BY_PORT: the collector parses the SRBMiner format only and
-    # must not poll this one. The pilot (pilots/miner_bench) reads it itself.
+    # must not poll this one. The pilot (pilots/miner/miner_bench) reads it itself.
     set -- /opt/krig/krig-miner --url "stratum+ssl://$POOL" --user "$WALLET/$WORKER" --no-rocm \
       --api-host 0.0.0.0 --api-port 4070
     ;;
+  qp)
+    # Quanpool's miner: POOL is its node address as the pool's page builds it -- `host:9834` for QUIC (then MINER_FLAGS
+    # carries --tls-cert-sha256 <pin>) or `stratum+tcp://host:9854` for stratum. The worker goes after a dot. No API.
+    set -- /usr/local/bin/quanpool-miner serve --node-addr "$POOL" --auth-token "$WALLET.$WORKER" --cpu-workers 0 \
+      ${MINER_FLAGS:-}
+    ;;
   *)
-    echo "unknown MINER '$MINER': expected srb-peak, srb, peak, krig, forge, bz, rg or fl4sh" >&2
+    echo "unknown MINER '$MINER': expected srb-peak, srb, peak, krig, forge, bz, rg, fl4sh or qp" >&2
     exit 64
     ;;
 esac
