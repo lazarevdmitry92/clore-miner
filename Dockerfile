@@ -1,6 +1,7 @@
 # One image per miner, so nothing can start the wrong one and neither image pays for the other's binary -- except srb-peak,
 # the fleet's image: SRBMiner, and PeakMiner where SRBMiner's dev fee is blocked (entrypoint.sh).
-# Built with one `--target` per miner (see .github/workflows/build.yml): srb-peak, srb, peak, krig, forge, bz, rg, fl4sh, qp, own.
+# Built with one `--target` per miner (see .github/workflows/build.yml): srb-peak, srb, peak, krig, forge, bz, rg, fl4sh, qp, own,
+# own-prof.
 # WildRig had a
 # fourth target until 21.09: Kryptex does not speak Stratum v1 at all, so a miner written for it has nothing
 # to assemble here (FACTS.md, "Пул и майнер").
@@ -161,3 +162,14 @@ RUN cd /opt/own && /opt/own/venv/bin/python -c "import miner.main" \
       if ldd "$f" | grep "not found" | grep -v "libcuda\.so\.1"; then echo "$f: missing libraries" >&2; exit 1; fi; \
     done
 EXPOSE 21550
+
+# own-prof: own plus Nsight Compute's CLI (ncu) to profile the V100 kernel on a rented card (TZ_v100_kernel_v2 §3.2).
+# The CUDA 12.6.3 devel image the kernel is built on already carries cuda-nsight-compute-12-6 (12.6.3-1, Nsight
+# Compute 2024.3): its directory is copied as is -- the same CUDA branch as the kernel, no NVIDIA apt repository.
+# Whether the host lets a container read the GPU counters (ERR_NVGPUCTRPERM) is the host's business, not the image's.
+FROM own AS own-prof
+COPY --from=own-kernel /opt/nvidia/nsight-compute/ /opt/nvidia/nsight-compute/
+RUN ln -s /opt/nvidia/nsight-compute/*/ncu /usr/local/bin/ncu \
+ && ncu --version \
+ && ncu --version | grep -q "Version 2024\.3" \
+ && ncu --list-sets | grep -q full
