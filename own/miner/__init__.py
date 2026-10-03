@@ -3,7 +3,7 @@ import os
 import sys
 from pathlib import Path
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 _REF = Path(os.environ.get("PEARL_REF", Path(__file__).resolve().parent.parent / "ref"))
 if not (_REF / "pearl_ref.py").exists():

@@ -55,7 +55,8 @@ if [ "$MINER" = "own-idle" ]; then
   while true; do sleep 300; done
 fi
 
-# own knows its pool: HeroMiners' TLS door unless the order names another.
+# own picks its pool node itself (--pool hm: every official HeroMiners Pearl node, by latency); POOL only names the door
+# the TCP check below tries.
 if [ "$MINER" = "own" ]; then
   : "${POOL:=stratum+ssl://pearl.herominers.com:1200}"
 fi
@@ -217,16 +218,14 @@ case "$MINER" in
       ${MINER_FLAGS:-}
     ;;
   own)
-    # Our own miner (Python, /opt/own): POOL as host:port gets the TLS scheme, the only one HM speaks to it. DRY_RUN=1
-    # (the default until a GPU kernel exists) builds and checks shares but never submits them. -u keeps its log flowing
-    # line by line through tee; the pool's raw exchange goes to /var/log/own/, read through the log port.
-    case "$POOL" in
-      *://*) pool_url="$POOL" ;;
-      *) pool_url="stratum+ssl://$POOL" ;;
-    esac
-    set -- /opt/own/venv/bin/python -u -m miner.main --pool "$pool_url" --wallet "$WALLET" --worker "$WORKER" \
-      --backend "${BACKEND:-cpu-ref}" --api-port 21550 --log-dir /var/log/own ${MINER_FLAGS:-}
-    if [ "${DRY_RUN:-1}" != "0" ]; then set -- "$@" --dry-run; fi
+    # Our own miner (Python, /opt/own), its supervisor: one card process per nvidia-smi card with the kernel of its
+    # compute capability from /opt/own/kernels, one pool connection and one worker for the server, the HM node chosen
+    # by latency, one /summary on 21550. DRY_RUN=1 (the default) builds and checks shares but never submits them.
+    # -u keeps its log flowing line by line through tee; the pool's raw exchange goes to /var/log/own/, read through
+    # the log port. --dry-run is decided before each start in the loop below: /var/log/own/live, written over ssh, takes
+    # a running dry container live at the miner's next start (a probe's go-live), and stays visible on the log port.
+    set -- /opt/own/venv/bin/python -u -m miner.main --all-gpus --pool hm --kernels-dir /opt/own/kernels \
+      --api-port 21550 --wallet "$WALLET" --worker "$WORKER" --log-dir /var/log/own ${MINER_FLAGS:-}
     ;;
   *)
     echo "unknown MINER '$MINER': expected srb-peak, srb, peak, krig, forge, bz, rg, fl4sh, qp or own" >&2
@@ -238,10 +237,15 @@ esac
 # would spin forever on a binary that is not there.
 [ -x "$1" ] || { echo "this image has no $1: MINER=$MINER belongs to the other image" >&2; exit 65; }
 
+# own: --dry-run unless DRY_RUN=0 or /var/log/own/live (see its case above), asked anew before every start.
+dry_run() {
+  if [ "$MINER" = own ] && [ "${DRY_RUN:-1}" != "0" ] && [ ! -e /var/log/own/live ]; then echo --dry-run; fi
+}
+
 # A miner that enumerates the cards and hashes on none (KRig, 21.09) says nothing about why. Its libraries do.
 {
   echo "--- command ---"
-  echo "$@"
+  echo "$@" $(dry_run)
   echo "--- ldd $1 ---"
   ldd "$1" 2>&1 || echo "ldd failed: $?"
 } >> /var/log/startup.log 2>&1
@@ -250,6 +254,6 @@ esac
 # The copy on disk is the only diagnosis when a miner starts but never hashes: a container's own stdout cannot be
 # read from inside it, while `ssh` into the order can read a file (the order needs ssh_password for that).
 while true; do
-  { "$@" 2>&1; echo "miner exited with code $?, restarting in 10 s"; } | tee -a /var/log/miner.log
+  { "$@" $(dry_run) 2>&1; echo "miner exited with code $?, restarting in 10 s"; } | tee -a /var/log/miner.log
   sleep 10
 done

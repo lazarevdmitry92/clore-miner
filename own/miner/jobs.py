@@ -5,13 +5,16 @@ seed_B, E_B, B'^T — B' stays fixed for the whole job (s0 §5).
 Per pass (job, nonce): A with the nonce written into its first row, root of A, seed_A, E_A, A'.
 A pass is all tiles of C' = A'·B', split into portions of row tiles for the backend; between portions the loop
 looks at the latest job: a new job means the pass is dropped; candidates of a job whose height is no longer
-current are stale and are not submitted. A = B = 0 (plus the nonce) by default; values stay in [-64, 64].
+current are stale and are not submitted. A lost pool connection clears the job (clear_job): no work, hashrate 0.
+Nonces: pass i of a job is nonce lane + lanes * (base + i), base random per job -- the cards of a server (lanes) and
+the servers on one header (HM sends every connection the same template) never redo each other's passes. A = B = 0 (plus the nonce) by default; values stay in [-64, 64].
 The mining thread only queues candidates; the submit thread builds PlainProof (Merkle tree of B^T once per job,
 of A once per pass), verifies it against the exact share target and submits.
 """
 import collections
 import logging
 import queue
+import secrets
 import threading
 import time
 from dataclasses import dataclass
@@ -31,6 +34,7 @@ ROWS_V100 = [0, 2, 8, 10, 16, 18, 24, 26]                    # mma.m8n8k4 (Volta
 COLS_V100 = [0, 1, 4, 5, 16, 17, 20, 21, 32, 33, 36, 37, 48, 49, 52, 53]
 TILES = {"8x16": (ROWS_8, COLS_16), "16x16": (RANGE_16, RANGE_16), "v100": (ROWS_V100, COLS_V100)}
 NONCE_DIGITS = 8                                              # base-129 digits in A[0, :8] -> 129^8 passes per job
+NONCE_SPACE = 129 ** NONCE_DIGITS
 
 
 def mining_config(k: int, r: int = 128, tile: str = "8x16") -> R.Config:
@@ -111,7 +115,7 @@ class Stats:
 class Miner:
     def __init__(self, backend: Backend, pool, stats: Stats, k: int = 2048, m: int = 1024, n: int = 1024,
                  portion_rows: int = 256, matrices: str = "zero", nbits_override: int | None = None,
-                 dry_run: bool = False, seed: int = 0, tile: str = "8x16"):
+                 dry_run: bool = False, seed: int = 0, tile: str = "8x16", nonce_lane: int = 0, nonce_lanes: int = 1):
         self.cfg = mining_config(k, tile=tile)
         self.cfg.sanity(m, n)
         for dim, name, per in ((m, "m", self.cfg.rows.period), (n, "n", self.cfg.cols.period)):
@@ -121,6 +125,9 @@ class Miner:
             raise ValueError(f"portion_rows={portion_rows} must be a positive multiple of {self.cfg.rows.period}")
         if matrices not in ("zero", "random"):
             raise ValueError("matrices: zero | random")
+        if not 0 <= nonce_lane < nonce_lanes:
+            raise ValueError(f"nonce lane {nonce_lane} outside [0, {nonce_lanes})")
+        self.nonce_lane, self.nonce_lanes = nonce_lane, nonce_lanes
         self.backend, self.pool, self.stats = backend, pool, stats
         self.m, self.n = m, n
         self.row_part, self.col_part = self.cfg.rows.partition(m), self.cfg.cols.partition(n)
@@ -134,6 +141,8 @@ class Miner:
         self._shares: queue.Queue = queue.Queue()
         self._stop = threading.Event()
         self._ids = 0
+        self.call_started: float | None = None   # monotonic start of the backend call in flight (the stall watchdog)
+        self.calls = 0                            # backend calls returned
 
     # ------------------------------------------------------------------ jobs in
 
@@ -144,6 +153,12 @@ class Miner:
             self._job_cv.notify_all()
         log.info("job %s height %d nbits %#010x diff %.0f%s", job.job_id, job.height, job.nbits, job.difficulty,
                  "  <- new block" if prev and prev.height != job.height else "")
+
+    def clear_job(self):
+        """The pool connection is lost: no current job, the pass in flight stops at its portion's end."""
+        with self._job_cv:
+            self._latest = None
+            self._job_cv.notify_all()
 
     def latest(self) -> Job | None:
         with self._job_cv:
@@ -206,7 +221,7 @@ class Miner:
     # ------------------------------------------------------------------ mining thread
 
     def run(self):
-        jw, b_id, nonce = None, 0, 0
+        jw, b_id, base, i = None, 0, 0, 0
         while not self._stop.is_set():
             with self._job_cv:
                 while self._latest is None and not self._stop.is_set():
@@ -216,10 +231,11 @@ class Miner:
                 return
             if jw is None or jw.job is not job:
                 t0 = time.time()
-                jw, b_id, nonce = self.prepare_job(job), self._next_id(), 0
+                jw, b_id, i = self.prepare_job(job), self._next_id(), 0
+                base = secrets.randbelow(NONCE_SPACE // self.nonce_lanes // 2)
                 log.debug("job %s prepared in %.3fs", job.job_id, time.time() - t0)
-            pw = self.prepare_pass(jw, nonce, b_id)
-            nonce += 1
+            pw = self.prepare_pass(jw, self.nonce_lane + self.nonce_lanes * (base + i), b_id)
+            i += 1
             self._run_pass(pw)
 
     def _run_pass(self, pw: PassWork):
@@ -227,7 +243,12 @@ class Miner:
         for lo in range(0, total, self.portion_tiles):
             if self._stop.is_set() or self.latest() is not pw.jw.job:
                 return
-            res = self.backend.search(pw.ops, lo, min(lo + self.portion_tiles, total))
+            self.call_started = time.monotonic()
+            try:
+                res = self.backend.search(pw.ops, lo, min(lo + self.portion_tiles, total))
+            finally:
+                self.call_started = None
+            self.calls += 1
             self.stats.add_macs(res.device, res.macs)
             if res.dropped:
                 self.stats.count("dropped", n=res.dropped)

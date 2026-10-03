@@ -80,6 +80,8 @@ class Backend:
     kernel = "none"
     cap = 16  # candidates per search call; more are counted in SearchResult.dropped (a hit is ~2^-34 per tile)
     card_note = None  # why a GPU backend's device is not tied to an nvidia-smi card (its work then goes to "cpu")
+    variants = None   # kernel variants the library exports (pearl_variants), None when it does not
+    variant = None    # the variant asked for by PEARL_VARIANT, None = the library's own choice
 
     def devices(self) -> list[dict]:
         """[{"id", "name", "pci_bus_id", "sm_count", "nvidia_index"}]; nvidia_index -> nvidia-smi telemetry."""
@@ -174,6 +176,9 @@ class SoBackend(Backend):
     Optional exports: int pearl_device_info(uint32_t *sm_count, char *name, uint32_t name_len) -- 0 = ok;
     without it sm_count is None and the device is named after the file. const char *pearl_last_error(void) -- the
     reason of the last non-zero return, added to KernelError; without it the error carries the code only.
+    int pearl_variants(char *names, uint32_t len) -- 0 = ok, comma-separated variant names (the supervisor tunes over
+    them). int pearl_set_variant(const char *name) -- 0 = ok, called at load with PEARL_VARIANT; a library without it
+    reads PEARL_VARIANT itself (kernels/v100) or has no variants.
     The device is tied to its nvidia-smi card by pinned_card() (one card per process); otherwise card_note says why
     not and /summary counts its work under "cpu"."""
     name = "so"
@@ -209,6 +214,29 @@ class SoBackend(Backend):
             if rc != 0:
                 raise self._error(f"pearl_device_info returned {rc}", rc)
             self._device.update(name=buf.value.decode("utf-8", "replace"), sm_count=sm.value)
+        names = getattr(self.lib, "pearl_variants", None)
+        if names is not None:
+            names.restype = ctypes.c_int
+            names.argtypes = [ctypes.c_char_p, ctypes.c_uint32]
+            buf = ctypes.create_string_buffer(4096)
+            rc = names(buf, len(buf))
+            if rc != 0:
+                raise self._error(f"pearl_variants returned {rc}", rc)
+            self.variants = [v for v in buf.value.decode("utf-8", "replace").split(",") if v]
+            if not self.variants:
+                raise KernelError("pearl_variants returned no names")
+        want = env.get("PEARL_VARIANT") or None
+        if want is not None:
+            if self.variants is not None and want not in self.variants:
+                raise ValueError(f"PEARL_VARIANT={want!r} is not one of the library's {self.variants}")
+            setter = getattr(self.lib, "pearl_set_variant", None)
+            if setter is not None:
+                setter.restype = ctypes.c_int
+                setter.argtypes = [ctypes.c_char_p]
+                rc = setter(want.encode())
+                if rc != 0:
+                    raise self._error(f"pearl_set_variant({want!r}) returned {rc}", rc)
+        self.variant = want
 
     def _error(self, msg, rc):
         if self._last_error is not None:
