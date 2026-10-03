@@ -1,6 +1,6 @@
 # One image per miner, so nothing can start the wrong one and neither image pays for the other's binary -- except srb-peak,
 # the fleet's image: SRBMiner, and PeakMiner where SRBMiner's dev fee is blocked (entrypoint.sh).
-# Built with one `--target` per miner (see .github/workflows/build.yml): srb-peak, srb, peak, krig, forge, bz, rg, fl4sh.
+# Built with one `--target` per miner (see .github/workflows/build.yml): srb-peak, srb, peak, krig, forge, bz, rg, fl4sh, qp.
 # WildRig had a
 # fourth target until 21.09: Kryptex does not speak Stratum v1 at all, so a miner written for it has nothing
 # to assemble here (FACTS.md, "Пул и майнер").
@@ -119,3 +119,14 @@ RUN curl -fsSL "https://github.com/kryptex/krig-miner/releases/download/v${KRIG_
  && rm /tmp/krig.tar.gz \
  && /opt/krig/krig-miner --help 2>&1 | grep -qi -- "--url"
 EXPOSE 4070
+
+# quanpool-miner: Quanpool's own Quantus miner, 2% dev fee, ~5% ahead of SRBMiner by the pool's benchmarks (Quantus
+# test, pilots/money/quantus, 2026-10-03). A single binary under a versioned name, pinned by the checksum the pool
+# publishes (/api/terms). No API: its log and the pool's per-worker stats are the witnesses.
+FROM base AS qp
+ARG QP_VERSION=6.3.1
+ARG QP_SHA256=affd6fda2e78d7cd05f2f46b0f3fa793980d9281f3ee349cdb910f584b95d72b
+RUN curl -fsSL "https://download.quanpool.com/quanpool-miner-${QP_VERSION}-linux-x86_64" -o /usr/local/bin/quanpool-miner \
+ && echo "${QP_SHA256}  /usr/local/bin/quanpool-miner" | sha256sum -c - \
+ && chmod +x /usr/local/bin/quanpool-miner \
+ && quanpool-miner --help 2>&1 | grep -qi serve

@@ -180,8 +180,14 @@ case "$MINER" in
     set -- /opt/krig/krig-miner --url "stratum+ssl://$POOL" --user "$WALLET/$WORKER" --no-rocm \
       --api-host 0.0.0.0 --api-port 4070
     ;;
+  qp)
+    # Quanpool's miner: POOL is its node address as the pool's page builds it -- `host:9834` for QUIC (then MINER_FLAGS
+    # carries --tls-cert-sha256 <pin>) or `stratum+tcp://host:9854` for stratum. The worker goes after a dot. No API.
+    set -- /usr/local/bin/quanpool-miner serve --node-addr "$POOL" --auth-token "$WALLET.$WORKER" --cpu-workers 0 \
+      ${MINER_FLAGS:-}
+    ;;
   *)
-    echo "unknown MINER '$MINER': expected srb-peak, srb, peak, krig, forge, bz, rg or fl4sh" >&2
+    echo "unknown MINER '$MINER': expected srb-peak, srb, peak, krig, forge, bz, rg, fl4sh or qp" >&2
     exit 64
     ;;
 esac
