@@ -51,6 +51,7 @@ EDGES = ("all+127", "all-127", "a+127_b-127", "checker", "signs")
 EASY = 0x1E00FFFF
 SMALL_CAP = 4
 CAP = 1 << 16          # > row tiles x col tiles of the largest case (512 x 512: 64 x 32)
+ROW_TILE_STEP = {"v100": 4}   # kernels/v100 takes row tiles [lo, hi) with lo, hi multiples of 4 (pearl_api.h)
 
 
 def now():
@@ -110,8 +111,9 @@ def cases(tiles, rng, tile="8x16"):
     while done < tiles:
         k, m, n = int(rng.choice(KS)), int(rng.choice(DIMS)), int(rng.choice(DIMS))
         desc, ops = make_case(i, str(rng.choice(["uniform", "noise"])), m, n, k, rng, tile)
-        lo = int(rng.integers(0, ops.row_tiles))
-        hi = int(rng.integers(lo + 1, ops.row_tiles + 1))
+        step = ROW_TILE_STEP.get(tile, 1)
+        lo = step * int(rng.integers(0, ops.row_tiles // step))
+        hi = step * int(rng.integers(lo // step + 1, ops.row_tiles // step + 1))
         yield desc, ops, lo, hi
         i += 1
         done += (hi - lo) * len(ops.col_part)
