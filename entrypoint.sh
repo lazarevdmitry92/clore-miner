@@ -176,7 +176,7 @@ case "$MINER" in
     # Kryptex's own miner: no dev fee, TLS-only stratum (POOL must be the SSL port), and the worker goes after a
     # slash, not a dot. --no-rocm skips the AMD probe on a fleet that is all NVIDIA.
     # 4070 is deliberately not in sources/fleet.MINER_BY_PORT: the collector parses the SRBMiner format only and
-    # must not poll this one. The pilot (pilots/miner_bench) reads it itself.
+    # must not poll this one. The pilot (pilots/miner/miner_bench) reads it itself.
     set -- /opt/krig/krig-miner --url "stratum+ssl://$POOL" --user "$WALLET/$WORKER" --no-rocm \
       --api-host 0.0.0.0 --api-port 4070
     ;;
