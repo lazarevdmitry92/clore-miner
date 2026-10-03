@@ -52,6 +52,10 @@ jobs:
             tags: |
               ghcr.io/${{ github.repository_owner }}/clore-miner:qp
               ghcr.io/${{ github.repository_owner }}/clore-miner:qp-${{ github.sha }}
+          - target: own
+            tags: |
+              ghcr.io/${{ github.repository_owner }}/clore-miner:own
+              ghcr.io/${{ github.repository_owner }}/clore-miner:own-${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
       - uses: docker/login-action@v3
