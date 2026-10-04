@@ -90,6 +90,8 @@ EXPOSE 4020
 FROM base AS rg
 ARG RG_VERSION=1.1.1
 ARG RG_SHA256=adff05182676e7b03998192a8720ee10e935f766cd3621423e7c16b68322ff79
+# strace -- which exec of its backend the kernel refuses (code 126 on V100 of host 21920, pilots/miner/qtc_v100_miners)
+RUN apt-get update && apt-get install -y --no-install-recommends strace && rm -rf /var/lib/apt/lists/*
 RUN curl -fsSL "https://github.com/Printscan/rgminer/releases/download/v${RG_VERSION}/rgminer-${RG_VERSION}" -o /usr/local/bin/rgminer \
  && echo "${RG_SHA256}  /usr/local/bin/rgminer" | sha256sum -c - \
  && chmod +x /usr/local/bin/rgminer \

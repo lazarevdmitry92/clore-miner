@@ -186,6 +186,12 @@ case "$MINER" in
     (
       sleep 60
       echo "=== $(date -u +%FT%TZ) id: $(id) HOME=${HOME:-} XDG_CACHE_HOME=${XDG_CACHE_HOME:-} TMPDIR=${TMPDIR:-}"
+      echo "kernel $(uname -r) memfd_noexec=$(cat /proc/sys/vm/memfd_noexec 2>&1)"
+      echo "--- strace of a second launcher, 20 s ---"
+      timeout 20 strace -f -e trace=execve,execveat,memfd_create,fexecve -o /var/log/rgstrace.log \
+        /usr/local/bin/rgminer --algo quantus --stratum "$POOL" --wallet "$WALLET.$WORKER" --no-cmp-unlock --plain-console \
+        --api-host 127.0.0.1 --api-port 21554 > /dev/null 2>&1
+      grep -E "memfd_create|execve|exited with 126|EACCES|EPERM|ENOEXEC" /var/log/rgstrace.log | head -40
       echo "--- mounts ---"; cat /proc/mounts
       echo "--- cache ---"; ls -laR "${XDG_CACHE_HOME:-${HOME:-/root}/.cache}" /.cache 2>&1 | head -80
       echo "--- /tmp ---"; ls -la /tmp 2>&1 | head -40
