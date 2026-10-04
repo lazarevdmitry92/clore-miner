@@ -181,6 +181,18 @@ case "$MINER" in
     # --proto kryptex: у него отдельный режим под диалект этого пула, по умолчанию он говорит на AkoyaV2.
     # --no-cmp-unlock: без него он лезет модифицировать драйвер ради разблокировки CMP-карт, падает с кодом 126
     # и уходит в вечный перезапуск — прав на это в контейнере площадки нет (проба 22.09).
+    # 1.1.1 на V100 (04.10): «cannot exec backend image», координатор пула выходит с 126. Через минуту после старта
+    # контейнер сам пишет в /var/log/rgdiag.log всё, что нужно для разбора: ssh в заказ Clore не пускает.
+    (
+      sleep 60
+      echo "=== $(date -u +%FT%TZ) id: $(id) HOME=${HOME:-} XDG_CACHE_HOME=${XDG_CACHE_HOME:-} TMPDIR=${TMPDIR:-}"
+      echo "--- mounts ---"; cat /proc/mounts
+      echo "--- cache ---"; ls -laR "${XDG_CACHE_HOME:-${HOME:-/root}/.cache}" /.cache 2>&1 | head -80
+      echo "--- /tmp ---"; ls -la /tmp 2>&1 | head -40
+      for f in $(find / -xdev \( -name 'rgminer.cuda*' -o -name 'rgminer-*backend*' \) 2>/dev/null | head -5); do
+        echo "--- exec $f ---"; ls -la "$f"; head -c 4 "$f" | od -c | head -1; "$f" --help 2>&1 | head -5; echo "exit $?"
+      done
+    ) > /var/log/rgdiag.log 2>&1 &
     # quantus говорит обычным stratum: без --proto и под своим именем алгоритма.
     if [ "${ALGO:-pearlhash}" = "quantus" ]; then
       set -- /usr/local/bin/rgminer --algo quantus --stratum "$POOL" --wallet "$WALLET.$WORKER" \
