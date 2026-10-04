@@ -59,10 +59,11 @@ COPY --from=peak /usr/local/bin/peakminer /usr/local/bin/peakminer
 # ровно один майнер. Архивы распаковываются вслепую (структура у всех своя), поэтому бинарь ищется по имени
 # и проверяется запуском — сборка падает здесь, а не на оплаченной аренде.
 
-# ForgeMiner: нативный NVIDIA, Kryptex в списке готовых пулов, 2% на pearlhash, собственный HTTP на 7777.
+# ForgeMiner: нативный NVIDIA, Kryptex в списке готовых пулов, 2% на pearlhash и quantus, собственный HTTP на 7777.
+# 1.8.4 -- quantus с ядром под Volta (пилот qtc_v100_miners, 04.10); сумма -- из релиза.
 FROM base AS forge
-ARG FORGE_VERSION=1.8.1
-ARG FORGE_SHA256=b8cfca82925957303c67e299069806ec27947a50bed3569630940c5c0490b519
+ARG FORGE_VERSION=1.8.4
+ARG FORGE_SHA256=491296d32a76eae56497830e885c1c671d20f9b43a44d14c3f1c3776eeeca192
 RUN curl -fsSL "https://github.com/0xHashRaptor/ForgeMiner/releases/download/v${FORGE_VERSION}/ForgeMiner-${FORGE_VERSION}-linux.tar.gz" -o /tmp/f.tgz \
  && echo "${FORGE_SHA256}  /tmp/f.tgz" | sha256sum -c - \
  && mkdir -p /opt/forge && tar xzf /tmp/f.tgz -C /opt/forge && rm /tmp/f.tgz \
@@ -85,9 +86,10 @@ EXPOSE 4020
 
 # RGMiner: один бинарь без архива, 2% на pearl. У него есть `--proto kryptex` -- отдельный режим под диалект
 # этого пула, что лишний раз подтверждает: протокол Kryptex не общий.
+# 1.1.1 -- quantus, 2% (пилот qtc_v100_miners, 04.10); релиз суммы не публикует, эта снята со скачанного бинаря.
 FROM base AS rg
-ARG RG_VERSION=1.0.7
-ARG RG_SHA256=7ac11240c6df2428958073e167b8cf52fc2d2f78417f4f0e4623d3bbe659b9af
+ARG RG_VERSION=1.1.1
+ARG RG_SHA256=adff05182676e7b03998192a8720ee10e935f766cd3621423e7c16b68322ff79
 RUN curl -fsSL "https://github.com/Printscan/rgminer/releases/download/v${RG_VERSION}/rgminer-${RG_VERSION}" -o /usr/local/bin/rgminer \
  && echo "${RG_SHA256}  /usr/local/bin/rgminer" | sha256sum -c - \
  && chmod +x /usr/local/bin/rgminer \
