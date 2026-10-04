@@ -65,6 +65,11 @@ fi
 # `/startup.log` the state of the machine. The port is published only when the order asks for it.
 busybox httpd -p 21559 -h /var/log || echo "log server did not start: $?" >> /var/log/startup.log
 
+# Our own record of the cards, whichever miner runs: not every miner reports clocks and power (rgminer, quanpool-miner),
+# and the A/B of miners compares them at the host's limit (pilots/miner/qtc_v100_miners). `/gpu.csv` on the log port.
+nvidia-smi --query-gpu=timestamp,index,clocks.sm,clocks.mem,power.draw,power.limit,temperature.gpu,utilization.gpu \
+  --format=csv,noheader -l 10 >> /var/log/gpu.csv 2>&1 &
+
 # Can the host reach the pool at all: a host that firewalls the pool port (`Socket error 113`, 112640) answers here in
 # the first minute -- ok, timeout, or the system's own words (refused, no route to host).
 pool_host="${POOL%:*}"
