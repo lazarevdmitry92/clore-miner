@@ -57,6 +57,12 @@ fi
   echo "--- nvidia-smi ---"
   nvidia-smi --query-gpu=index,name,driver_version,clocks.max.sm,power.limit,power.default_limit,power.max_limit \
     --format=csv 2>&1 || echo "nvidia-smi failed: $?"
+  # A section of its own, so a driver that refuses one of these fields cannot take the card table above with it: the
+  # memory ceiling (the passport's mem_clock) and the PCIe link as the card sees it -- the host's description may lie.
+  # gen.current drops while a card idles, so it is the link before the miner loads it, not under load.
+  echo "--- nvidia-smi pcie and memory ---"
+  nvidia-smi --query-gpu=index,clocks.max.memory,pcie.link.gen.current,pcie.link.gen.max,pcie.link.width.current,pcie.link.width.max \
+    --format=csv 2>&1 || echo "nvidia-smi failed: $?"
   echo "--- persistence and accounting (can we set anything at all) ---"
   nvidia-smi -q -d PERFORMANCE 2>&1 | head -40 || true
 } > /var/log/startup.log 2>&1
@@ -67,7 +73,13 @@ busybox httpd -p 21559 -h /var/log || echo "log server did not start: $?" >> /va
 
 # Our own record of the cards, whichever miner runs: not every miner reports clocks and power (rgminer, quanpool-miner),
 # and the A/B of miners compares them at the host's limit (pilots/miner/qtc_v100_miners). `/gpu.csv` on the log port.
-nvidia-smi --query-gpu=timestamp,index,clocks.sm,clocks.mem,power.draw,power.limit,temperature.gpu,utilization.gpu \
+# The last column, when the driver has it: the clock event (throttle) reasons as nvidia-smi's hex mask -- heat, power cap
+# or a hardware slowdown, the reason a clock fell (docs/plans/2026-10-05-host-card-coefficients.md, 11.2). Drivers before
+# 535 call it clocks_throttle_reasons; a driver with neither keeps the eight columns of before.
+reasons=clocks_event_reasons.active
+nvidia-smi --query-gpu=$reasons --format=csv,noheader > /dev/null 2>&1 || reasons=clocks_throttle_reasons.active
+nvidia-smi --query-gpu=$reasons --format=csv,noheader > /dev/null 2>&1 || reasons=
+nvidia-smi --query-gpu=timestamp,index,clocks.sm,clocks.mem,power.draw,power.limit,temperature.gpu,utilization.gpu${reasons:+,$reasons} \
   --format=csv,noheader -l 10 >> /var/log/gpu.csv 2>&1 &
 
 # Can the host reach the pool at all: a host that firewalls the pool port (`Socket error 113`, 112640) answers here in
@@ -83,10 +95,27 @@ pool_tcp() {
     echo "failed: $out"
   fi
 }
+# How long the connect to the pool takes, in ms: the address resolved first, so the time is the way to the pool and not
+# the DNS. `connect_ms none` -- no address or no connect within 5 s (the line above says which).
+pool_connect_ms() {
+  ip=$(getent ahostsv4 "$pool_host" | awk 'NR == 1 {print $1}')
+  [ -n "$ip" ] || return 1
+  timeout 5 bash -c "s=\$EPOCHREALTIME; exec 3<>/dev/tcp/$ip/$pool_port && e=\$EPOCHREALTIME &&
+    echo \$(( (\${e//[.,]/} - \${s//[.,]/}) / 1000 ))" 2>/dev/null
+}
 {
   printf -- "--- pool %s:%s tcp ---\n" "$pool_host" "$pool_port"
   pool_tcp
+  echo "connect_ms $(pool_connect_ms || echo none)"
 } >> /var/log/startup.log 2>&1
+
+# Every exit of a miner, one line each, `miner_exit <UTC> <miner> <code>` -- in its log next to its last words and in
+# /var/log/exits.log on the log port, small enough to read whole: which restarts are the miner's own and which the host's.
+miner_exit() {
+  line="miner_exit $(date -u +%FT%TZ) $1 $2"
+  echo "$line" >> /var/log/exits.log
+  echo "$line"
+}
 
 # srb-peak: SRBMiner first; when its dev fee is blocked (RU/UA hosts: `Devfee related operations were blocked`, then it
 # exits) twice in a row, PeakMiner on the same pool, worker and API port, for good. A run counts as blocked only while
@@ -108,9 +137,11 @@ if [ "$MINER" = "srb-peak" ]; then
   while [ "$blocked" -lt 2 ]; do
     # each run gets a fresh srb.log, the run before it stays as srb.prev.log
     mv -f /var/log/srb.log /var/log/srb.prev.log 2>/dev/null || true
+    code=0
     /opt/srbminer/SRBMiner-MULTI --disable-cpu --algorithm "${ALGO:-pearlhash}" --pool "$POOL" \
       --wallet "$WALLET.$WORKER" --api-enable --api-port 21550 --log-file /var/log/srb.log ${MINER_FLAGS:-} \
-      >> /var/log/miner.log 2>&1 || true
+      >> /var/log/miner.log 2>&1 || code=$?
+    miner_exit srb "$code" >> /var/log/miner.log
     if grep -q "Devfee related operations were blocked" /var/log/srb.log 2>/dev/null; then
       pool=$(pool_tcp)
       if [ "$pool" = ok ]; then
@@ -133,8 +164,10 @@ if [ "$MINER" = "srb-peak" ]; then
   cuda=0
   while [ "$cuda" -lt 3 ]; do
     before=$(wc -l < /var/log/peak.log)
+    code=0
     /usr/local/bin/peakminer --coin "$coin" --url "$POOL" --user "$WALLET.$WORKER" --api-port 0.0.0.0:21550 \
-      >> /var/log/peak.log 2>&1 || true
+      >> /var/log/peak.log 2>&1 || code=$?
+    miner_exit peak "$code" >> /var/log/peak.log
     if tail -n "+$((before + 1))" /var/log/peak.log | grep -qi -e CUDA_700 -e "illegal address"; then
       cuda=$((cuda + 1))
     else
@@ -231,6 +264,7 @@ esac
 # The copy on disk is the only diagnosis when a miner starts but never hashes: a container's own stdout cannot be
 # read from inside it, while `ssh` into the order can read a file (the order needs ssh_password for that).
 while true; do
-  { "$@" 2>&1; echo "miner exited with code $?, restarting in 10 s"; } | tee -a /var/log/miner.log
+  { "$@" 2>&1; code=$?; echo "miner exited with code $code, restarting in 10 s"; miner_exit "$MINER" "$code"; } \
+    | tee -a /var/log/miner.log
   sleep 10
 done
