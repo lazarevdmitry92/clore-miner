@@ -264,7 +264,9 @@ esac
 # The copy on disk is the only diagnosis when a miner starts but never hashes: a container's own stdout cannot be
 # read from inside it, while `ssh` into the order can read a file (the order needs ssh_password for that).
 while true; do
-  { "$@" 2>&1; code=$?; echo "miner exited with code $code, restarting in 10 s"; miner_exit "$MINER" "$code"; } \
+  # `|| code=$?`, not `; code=$?`: under `set -e` dash ends the left side of the pipe at the miner's failure, and neither
+  # line below would be written for any exit but 0
+  { code=0; "$@" 2>&1 || code=$?; echo "miner exited with code $code, restarting in 10 s"; miner_exit "$MINER" "$code"; } \
     | tee -a /var/log/miner.log
   sleep 10
 done
