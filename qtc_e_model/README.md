@@ -56,8 +56,9 @@ The real S10 allocator/scheduler, eight `sim2` seeds, gives:
 | instructions | 194 | **182** |
 | partial-body registers / predicates / scoreboards / spills | — | **60 / 5 / 1 / 0** |
 | kernel energy model | 509.00 nJ | **504.72 nJ** |
-| model E/D central | 1 | **1.01990** |
-| model E/D LCB95 | — | **1.01215** |
+| physical E/D before residual calibration | 1 | **1.01990** |
+| residual-v2 corrected E/D | 1 | **1.02260** |
+| residual-v2 LCB95 | — | **1.01152** |
 
 The feasible model candidate therefore passes the model gate. This is not a
 GPU performance claim. The combined body remains at D's whole-kernel ceiling
@@ -69,13 +70,18 @@ problems; 20,000 states x 22 partial rounds (one quarter edge-only) with zero
 bit differences from the reference and zero differences from the ptxas loop
 on the 2,000 sampled comparisons.
 
+The central and lower-bound decision uses the actual S15 residual-v2 contract,
+not a manual arm-noise approximation: coefficient `0.1343555`, covariance
+`0.00289469`, model log-SD `0.00419068`, plus candidate log-SD `0.0035`.
+
 For the 24 binary fusion choices, every choice removes one F-pipe `IMAD.X`
 and 8.1 pJ while leaving A work unchanged. Full D is A-bound. Partial reaches
 its A floor after 11 choices and the twelfth still lowers energy. Monotonicity
 therefore certifies the resource optimum at all 24 choices without enumerating
 `2^24` assignments. With the measured `120/128` mixing ceiling its upper
-bound is central `1.05834`, LCB95 `1.05030`; the feasible-to-upper throughput
-gap is about 3.77%.
+physical upper bound is `1.05834`. Its residual-v2 projection is reported
+separately by the tool; it is a calibrated forecast around the resource bound,
+not part of the mathematical certificate.
 
 ## Reproduction and next gates
 

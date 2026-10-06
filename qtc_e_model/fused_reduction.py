@@ -67,8 +67,10 @@ class Candidate:
     spills: int
     energy_nj: float
     projected_t: float
-    central_ed: float
+    physics_ed: float
+    corrected_ed: float
     lcb95_ed: float
+    residual_log_sd: float
     passes_gate: bool
 
 
@@ -81,9 +83,10 @@ class BoundCertificate:
     fused_partial_outputs: int
     full_cycle_floor: float
     partial_cycle_floor: float
-    central_ed_upper: float
-    lcb95_ed_upper: float
-    candidate_to_upper_gap: float
+    physics_ed_upper: float
+    corrected_ed_upper: float
+    corrected_lcb95_upper: float
+    candidate_to_corrected_upper_gap: float
 
 
 @dataclasses.dataclass(frozen=True)
@@ -159,8 +162,34 @@ def throughput_ratio(t: float, energy_nj: float, anchor: Anchor = Anchor()) -> f
     return (e_clock / t) / (d_clock / anchor.measured_t)
 
 
-def lcb95(ratio: float, d_sd: float = 0.0017, e_sd: float = 0.0035) -> float:
-    return math.exp(math.log(ratio) - Z95 * math.hypot(d_sd, e_sd))
+@dataclasses.dataclass(frozen=True)
+class ResidualV2:
+    """Frozen sm70 fit reproduced from S15 ``model_v2.py`` and history.
+
+    The fit learns the residual around the physical log-ratio from 18 paired
+    observations in six independent groups.  Candidate uncertainty is added
+    exactly as in ``model_v2.project``; the old hand-written D/E noise shortcut
+    is deliberately not part of this contract.
+    """
+
+    coefficient: float = 0.13435549676440053
+    covariance: float = 0.0028946939923161492
+    model_log_sd: float = 0.004190681206093888
+    candidate_log_sd: float = 0.0035
+
+
+def residual_v2_projection(physics_ratio: float, fit: ResidualV2 = ResidualV2()) -> tuple[float, float, float]:
+    if not math.isfinite(physics_ratio) or physics_ratio <= 0:
+        raise ValueError("physics_ratio must be finite and positive")
+    physics_log = math.log(physics_ratio)
+    corrected_log = physics_log * (1.0 + fit.coefficient)
+    log_sd = math.sqrt(
+        physics_log * physics_log * fit.covariance
+        + fit.model_log_sd * fit.model_log_sd
+        + fit.candidate_log_sd * fit.candidate_log_sd
+    )
+    corrected = math.exp(corrected_log)
+    return corrected, math.exp(corrected_log - Z95 * log_sd), log_sd
 
 
 def project(
@@ -186,8 +215,8 @@ def project(
         anchor.full_repeats * (full_cycles - anchor.full_cycles)
         + anchor.partial_repeats * (partial_cycles - anchor.partial_cycles)
     ) / anchor.phase_scale
-    ratio = throughput_ratio(t, energy, anchor)
-    lower = lcb95(ratio)
+    physics_ratio = throughput_ratio(t, energy, anchor)
+    corrected, lower, residual_log_sd = residual_v2_projection(physics_ratio)
     valid = registers <= 64 and predicates <= 6 and scoreboards <= 6 and spills == 0
     return Candidate(
         name=name,
@@ -206,9 +235,11 @@ def project(
         spills=spills,
         energy_nj=energy,
         projected_t=t,
-        central_ed=ratio,
+        physics_ed=physics_ratio,
+        corrected_ed=corrected,
         lcb95_ed=lower,
-        passes_gate=valid and ratio >= 1.015 and lower >= 1.010,
+        residual_log_sd=residual_log_sd,
+        passes_gate=valid and corrected >= 1.015 and lower >= 1.010,
     )
 
 
@@ -256,12 +287,13 @@ def build_report(anchor: Anchor = Anchor()) -> Report:
         fused_partial_outputs=12,
         full_cycle_floor=full_floor,
         partial_cycle_floor=partial_floor,
-        central_ed_upper=upper.central_ed,
-        lcb95_ed_upper=upper.lcb95_ed,
-        candidate_to_upper_gap=upper.central_ed / candidate.central_ed - 1.0,
+        physics_ed_upper=upper.physics_ed,
+        corrected_ed_upper=upper.corrected_ed,
+        corrected_lcb95_upper=upper.lcb95_ed,
+        candidate_to_corrected_upper_gap=upper.corrected_ed / candidate.corrected_ed - 1.0,
     )
     return Report(
-        objective="maximize paired accepted E/D under V100 power cap; central>=1.015 and LCB95>=1.010",
+        objective="maximize paired accepted E/D under V100 power cap; residual-v2 corrected>=1.015 and LCB95>=1.010",
         arithmetic_identity="lo-r3-k = lo+~r3+!k; hi'=hi+k-borrow",
         candidate=candidate,
         certificate=certificate,

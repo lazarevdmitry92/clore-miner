@@ -43,9 +43,17 @@ def test_partial_candidate_passes_model_gate_and_constraints():
     assert candidate.predicates == 6
     assert candidate.scoreboards == 6
     assert candidate.spills == 0
-    assert candidate.central_ed == pytest.approx(1.0198986887600312)
-    assert candidate.lcb95_ed == pytest.approx(1.0121502697963802)
+    assert candidate.physics_ed == pytest.approx(1.0198986887600312)
+    assert candidate.corrected_ed == pytest.approx(1.0226021886666754)
+    assert candidate.lcb95_ed == pytest.approx(1.0115150633202001)
     assert candidate.passes_gate
+
+
+def test_residual_v2_is_the_s15_projection_not_manual_arm_noise():
+    corrected, lower, log_sd = model.residual_v2_projection(1.0198986887600312)
+    assert corrected == pytest.approx(1.0226021886666754)
+    assert lower == pytest.approx(1.0115150633202001)
+    assert log_sd == pytest.approx(0.005561976886909657)
 
 
 def test_resource_bound_is_exact_for_the_binary_fusion_family():
@@ -55,5 +63,6 @@ def test_resource_bound_is_exact_for_the_binary_fusion_family():
     assert certificate.exact_resource_optimum
     assert certificate.fused_full_outputs == 12
     assert certificate.fused_partial_outputs == 12
-    assert certificate.central_ed_upper == pytest.approx(1.0583434947392545)
-    assert certificate.lcb95_ed_upper == pytest.approx(1.0503030012127217)
+    assert certificate.physics_ed_upper == pytest.approx(1.0583434947392545)
+    assert certificate.corrected_ed_upper == pytest.approx(1.0664374058362223)
+    assert certificate.corrected_lcb95_upper == pytest.approx(1.0534440543583607)
