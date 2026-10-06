@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+from pathlib import Path
 import random
 
 import pytest
@@ -69,8 +71,45 @@ def test_resource_bound_is_exact_for_the_binary_fusion_family():
     assert certificate.corrected_lcb95_upper == pytest.approx(1.0521332850266203)
 
 
-def test_e3_bank_schedule_is_repeatable_and_dependency_safe(tmp_path):
+def test_e3_bank_schedule_is_repeatable_and_dependency_safe():
     # Pure guards for the transform itself; pilot-backed regeneration is
     # covered by the committed SASS artifact and its offline verifier.
     assert model.E3_FULL_INDICES == (0, 2, 3, 4, 5, 6, 8, 9, 11)
     assert model.E3_ADJACENT_SWAP == 360
+
+
+def _real_pilot_root() -> Path | None:
+    configured = os.environ.get("QTC_S10_PILOT_ROOT")
+    if configured:
+        candidate = Path(configured)
+        return candidate if (candidate / "s10" / "frag" / "gen.py").is_file() else None
+    repository = Path(__file__).resolve().parents[2]
+    candidates = [repository / "pilots" / "miner" / "qtc_own_miner"]
+    dotgit = repository / ".git"
+    if dotgit.is_file():
+        line = dotgit.read_text().strip()
+        if line.startswith("gitdir: "):
+            common_worktree = Path(line.removeprefix("gitdir: ")).resolve().parents[2]
+            candidates.append(common_worktree / "pilots" / "miner" / "qtc_own_miner")
+    return next((candidate for candidate in candidates if (candidate / "s10" / "frag" / "gen.py").is_file()), None)
+
+
+def test_real_generator_double_patch_reset_is_idempotent():
+    pilot_root = _real_pilot_root()
+    if pilot_root is None:
+        pytest.skip("ignored S10 pilot is not present")
+
+    def generate_signature():
+        gen, _partial, _body_io = model._patch_pilot(pilot_root)
+        native = gen.qtc_e_native_out_fold
+        gen.qtc_e_reset_fusion()
+        opts = gen.Opts(lam=0.35, w_imb=4.0, w_stall=1.5, window=2, ldc_max=2, rho=1.0, w_h=0.02, w_chain=3.0)
+        _lines, _labels, blocks = gen.generate("L", lambda _i: ("F",) * 6, opts_s=opts, opts_m=opts)
+        return gen, native, tuple((len(block.ops), len(block.order)) for block in blocks)
+
+    first_gen, native, first = generate_signature()
+    second_gen, second_native, second = generate_signature()
+    assert second_gen is first_gen
+    assert second_native is native
+    assert first == second
+    assert first == ((683, 683), (197, 197))

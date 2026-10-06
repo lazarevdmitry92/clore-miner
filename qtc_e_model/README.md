@@ -148,6 +148,11 @@ The committed combined body passes:
 - 20,000 states x 22 partial rounds, zero bit differences and zero ptxas-loop
   differences on 2,000 sampled comparisons.
 
+The pilot adapter is idempotent: it stores the native full-output builder once
+and every selective mask wraps that native function. A real S10 regression
+patches, resets and generates twice in one interpreter and requires identical
+`683`-instruction main and `197`-instruction lin8 IR bodies.
+
 Pure reports and tests:
 
 ```sh

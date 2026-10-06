@@ -327,7 +327,14 @@ def _patch_pilot(
     if any(index < 0 or index >= 12 for index in full_fused):
         raise ValueError("full fusion indices must be in 0..11")
     full_state = {"index": 0}
-    original_out_fold = gen.out_fold
+    # `_patch_pilot` is used by optimizers that may install several masks in
+    # one interpreter.  Always fall back to the native builder: wrapping the
+    # previous selective wrapper makes its private counter consume the call a
+    # second time and silently changes both main and lin8 bodies.
+    original_out_fold = getattr(gen, "qtc_e_native_out_fold", None)
+    if original_out_fold is None:
+        original_out_fold = gen.out_fold
+        gen.qtc_e_native_out_fold = original_out_fold
 
     def selective_full_fold(block, y, s, rcp, chain, out0, out1):
         # One L generation calls out_fold for 12 common outputs and then 12
