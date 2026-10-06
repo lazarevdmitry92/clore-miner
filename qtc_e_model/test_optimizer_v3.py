@@ -59,3 +59,14 @@ def test_report_distinguishes_global_resource_bound_from_schedule_search():
     assert frontier["evaluated_neighbors"] == 461
     assert frontier["best_neighbor_lcb95"] < 1.04
     assert frontier["accepted_as_new_incumbent"] is False
+    beam = report["joint_relocate_beam"]
+    assert beam["unique_states"] == 298
+    assert beam["best_normalized_cycles"] < frontier["best_neighbor_normalized_cycles"]
+    assert beam["best_lcb95"] < 1.04
+    assert report["occupancy_56_gate"]["lower_bound_declared_registers"] == 59
+    assert report["occupancy_56_gate"]["reachable_without_frame_remap"] is False
+    saturation = report["saturation"]
+    assert sum(saturation["unique_states"]) == 603
+    assert saturation["maximum_gain_over_e3"] < 0.0005
+    assert saturation["same_resource_basin"]
+    assert saturation["arithmetic_restructure_required"]

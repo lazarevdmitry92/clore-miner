@@ -12,11 +12,12 @@ existing model gate is central `>=1.015` and one-sided `LCB95>=1.010`; the new
 product goal is an independently confirmed `>=1.04`. QP is outside this
 optimizer: E must first beat D in a randomized paired test.
 
-The best feasible model point, **E3**, is central `1.04625 E/D` and LCB95
-`1.03429`. It passes the existing model gate and clears +4% centrally, but it
-does **not** establish +4% with 95% confidence. The decision is therefore
-MODEL-GO for continued offline/SASS validation, not a performance claim and
-not yet authorization for a GPU test.
+The committed fallback, **E3**, is central `1.04625 E/D` and LCB95 `1.03429`.
+The later E4 relocate/beam model point reaches central `1.04648` and LCB95
+`1.03451`. Both pass the existing model gate and clear +4% centrally, but
+neither establishes +4% with 95% confidence. E4 is therefore only the best
+observed offline schedule; E3 remains the fallback artifact, and neither is
+authorization for a GPU test.
 
 ## Arithmetic change
 
@@ -119,6 +120,43 @@ only `1238.459 -> 1238.405` and LCB95 `1.03429 -> 1.03431`; this immaterial
 change is not a new incumbent. The next search must use multi-operation
 relocate/beam nodes jointly with recoloring, not another single-swap pass.
 
+That next search has now been executed. A deterministic depth-3 beam visited
+298 unique schedules (312 generated edges). Every edge relocates one
+instruction across at least two dependency- and physical-register-safe
+instructions; each resulting node is bank-recolored before simulator scoring.
+The six leaders were confirmed on 64 seeds. The best three-move schedule
+(`47->43`, `64->69`, `627->629`) keeps four bank conflicts and moves raw
+cycles `1238.459 -> 1237.840`, normalized to `1238.257`. Its residual-v2
+forecast is central `1.04648 E/D`, LCB95 `1.03451`: a real local improvement,
+but still well below the `1.04` confidence target. This is the best observed
+point over the visited relocate/recolor graph, not a bound over every legal
+schedule, so it remains model-only and is not promoted to GPU testing.
+
+The `declared <=56` occupancy gate is independently closed for the unchanged
+S10 frame. The body count is highest physical register plus three, hence the
+target requires at most `R53`; pinned ABI words already occupy `R56`, proving
+a lower bound of 59 declared registers before allocating any temporary. A
+schedule or live-interval recolor cannot pass this gate. Reaching it requires
+a whole-kernel frame/splicer remap, which is a different candidate family.
+
+Because schedule-only progress is 0.62 cycles against the 15.47 normalized
+cycles still needed for LCB95 1.04, the next model branch should change A-pipe
+work: carry-save/redundant accumulation across the M4 column/output reduction,
+with an exact range proof before scheduling. Merely fusing the remaining three
+outputs removes F work while the full body remains A-bound, so it cannot by
+itself certify the missing gap.
+
+The formal saturation run used three independent starts over depths 2 through
+4, each with beam width 4 and branch budget 16. They visited `202 + 201 + 200
+= 603` unique states (`624` directed edges total), and confirmed four leaders
+per start on 64 seeds. Their LCB95 results were `1.034421`, `1.034398`, and
+`1.034398`: maximum gain over E3 `0.000129`, spread `0.000023`, all at four
+bank conflicts. This satisfies the frozen stop rule (three gains below
+`0.0005`, one resource basin). Together with the `declared>=59` certificate,
+the current schedule/recolor/frame family is stopped. The arithmetic resource
+upper LCB95 is still `1.05213 >= 1.04`, so the conditional arithmetic/kernel
+restructure cycle remains open.
+
 ## Confidence and useful data
 
 Residual v2 is frozen from S15: 18 paired observations in six independent
@@ -165,8 +203,14 @@ Pure reports and tests:
 ```sh
 python3.11 -m miner.qtc_e_model.fused_reduction
 python3.11 -m miner.qtc_e_model.optimizer_v3
+python3.11 -m miner.qtc_e_model.optimizer_e4 \
+  --pilot-root pilots/miner/qtc_own_miner
 python3.11 -m pytest -q miner/qtc_e_model
 ```
+
+Further model search uses the rental hybrid package and mandatory CUDA parity
+gate described in [`RENTAL.md`](RENTAL.md). Local execution is limited to
+package/unit/parity smoke and result analysis.
 
 With the ignored S10 pilot present, regenerate and verify the body:
 
@@ -182,6 +226,6 @@ python3.14 pilots/miner/qtc_own_miner/s10/frag/verify_partial.py \
   /tmp/frag_partial_E_fused.sass 20000
 ```
 
-Before any GPU use: assemble with S10, confirm the same resource ceilings in
-real SASS, and pass the existing 33,554,432-nonce correctness gate. Only then
-can a short randomized D/E ABBA be considered.
+Before any target-V100 performance run: assemble with S10, confirm the same
+resource ceilings in real SASS, and pass the existing 33,554,432-nonce
+correctness gate. Only then can a short randomized D/E ABBA be considered.

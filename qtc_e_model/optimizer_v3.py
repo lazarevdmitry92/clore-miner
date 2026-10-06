@@ -290,13 +290,54 @@ def build_optimizer_report() -> dict[str, object]:
             "accepted_as_new_incumbent": False,
             "reason": "0.054-cycle gain is immaterial and does not change the model decision",
         },
+        "joint_relocate_beam": {
+            "method": "depth-3 multi-operation relocate beam with per-node bank-aware recolor",
+            "generated_edges": 312,
+            "unique_states": 298,
+            "coarse_seeds": 1,
+            "confirmed_states": 6,
+            "confirmation_seeds": 64,
+            "moves": ((47, 43), (64, 69), (627, 629)),
+            "e3_raw_cycles": 1238.4588178926983,
+            "best_raw_cycles": 1237.8403765930216,
+            "best_normalized_cycles": 1238.2572114332256,
+            "best_lcb95": 1.0345106240695512,
+            "reaches_lcb_1_04": False,
+            "scope": "best observed over the visited directed relocate/recolor graph, not a schedule bound",
+        },
+        "occupancy_56_gate": {
+            "target_declared_registers": 56,
+            "maximum_allowed_physical_register": 53,
+            "maximum_fixed_physical_register": 56,
+            "lower_bound_declared_registers": 59,
+            "reachable_without_frame_remap": False,
+            "scope": "certified for the unchanged S10 frame/ABI",
+        },
+        "saturation": {
+            "criterion": "stop after 3 confirmed starts when every absolute LCB gain is <0.0005 and one basin",
+            "depths": "2..4",
+            "starts": 3,
+            "unique_states": (202, 201, 200),
+            "generated_edges": (208, 208, 208),
+            "confirmed_candidates": (4, 4, 4),
+            "confirmation_seeds": 64,
+            "lcb95_results": (1.0344211047124616, 1.0343980705706526, 1.0343980705706526),
+            "maximum_gain_over_e3": 0.00012899797190835116,
+            "result_spread": 2.303414180904184e-05,
+            "common_bank_conflicts": 4,
+            "same_resource_basin": True,
+            "stagnated": True,
+            "current_family_stopped": True,
+            "arithmetic_resource_upper_lcb95": 1.0521332850266203,
+            "arithmetic_restructure_required": True,
+        },
         "residual_variance": variance,
         "residual_sensitivity": sensitivity,
         "leave_one_group_out": LOO_SENSITIVITY,
         "decision": (
-            "E3 is the best observed model point and remains fallback-only: central exceeds 1.04, "
-            "but LCB95 does not. Even zero bank conflicts plus hypothetical 10-warps/SMSP misses "
-            "LCB95=1.04 for the fixed E3 order; a joint scheduler/allocator or new arithmetic is required."
+            "E4 relocate/beam is the best observed schedule point but remains model-only: central exceeds "
+            "1.04, LCB95 does not. E3 remains the committed fallback artifact; the unchanged-frame "
+            "occupancy gate is impossible and new A-pipe arithmetic is required."
         ),
     }
 
