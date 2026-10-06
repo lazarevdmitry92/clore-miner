@@ -41,7 +41,7 @@ def test_binary_round_trip_preserves_cpu_parity(tmp_path: Path):
 def test_unscored_batch_contains_no_accidental_cpu_claim(tmp_path: Path):
     batch = hybrid.Batch((_trace(),), (0, 1), nwarps=2, reps=2)
     path = tmp_path / "frontier.bin"
-    hybrid.write_unscored_batch(path, batch)
+    hybrid._write_unscored_batch(path, batch)
     _restored, expected = hybrid.read_batch(path)
     assert all(value != value for value in expected)  # NaN reference means GPU production mode
 
@@ -129,23 +129,23 @@ def _model_root(tmp_path: Path) -> Path:
 def test_parity_artifact_binds_exact_binary_batch_and_model(tmp_path: Path):
     binary = tmp_path / "scorer"
     binary.write_bytes(b"binary-v1")
-    batch_path = tmp_path / "parity.bin"
-    batch = hybrid.Batch((_trace(),), (0,), nwarps=2, reps=6)
-    hybrid.write_batch(batch_path, batch)
+    batch_paths = {3: tmp_path / "parity-3.bin", 6: tmp_path / "parity-6.bin"}
+    for reps, batch_path in batch_paths.items():
+        batch = hybrid.Batch((_trace(),), (0,), nwarps=2, reps=reps)
+        hybrid.write_batch(batch_path, batch)
     pilot_root = _model_root(tmp_path)
     artifact = tmp_path / "parity.json"
     hybrid.create_parity_artifact(
         artifact,
         executable=binary,
-        batch_path=batch_path,
+        batch_paths=batch_paths,
         pilot_root=pilot_root,
-        jobs=1,
-        max_abs_difference=0.0,
+        results={3: (1, 0.0), 6: (1, 0.0)},
     )
     hybrid.verify_parity_artifact(
         artifact,
         executable=binary,
-        batch_path=batch_path,
+        batch_paths=batch_paths,
         pilot_root=pilot_root,
     )
 
@@ -154,9 +154,50 @@ def test_parity_artifact_binds_exact_binary_batch_and_model(tmp_path: Path):
         hybrid.verify_parity_artifact(
             artifact,
             executable=binary,
-            batch_path=batch_path,
+            batch_paths=batch_paths,
             pilot_root=pilot_root,
         )
+
+    binary.write_bytes(b"binary-v1")
+    batch_paths[3].write_bytes(batch_paths[3].read_bytes()[:-1] + b"x")
+    with pytest.raises(ValueError, match="reps=3 parity batch hash"):
+        hybrid.verify_parity_artifact(
+            artifact,
+            executable=binary,
+            batch_paths=batch_paths,
+            pilot_root=pilot_root,
+        )
+
+
+def test_parity_suite_refuses_a_missing_repetition(tmp_path: Path):
+    with pytest.raises(ValueError, match="exactly reps=3 and reps=6"):
+        hybrid.create_parity_artifact(
+            tmp_path / "parity.json",
+            executable=tmp_path / "missing",
+            batch_paths={},
+            pilot_root=tmp_path,
+            results={},
+        )
+
+
+def test_gpu_check_runs_and_attests_both_repetition_modes(tmp_path: Path):
+    scorer = tmp_path / "scorer"
+    scorer.write_text(
+        f"#!{sys.executable}\n"
+        "import struct, sys\n"
+        "data = open(sys.argv[1], 'rb').read()\n"
+        "_m, _v, candidates, _length, seeds, _warps, _reps, _fields = struct.unpack_from('<8s7I', data)\n"
+        "open(sys.argv[2], 'wb').write(data[-candidates * seeds * 8:])\n",
+        encoding="utf-8",
+    )
+    scorer.chmod(0o755)
+    batch_paths = {3: tmp_path / "parity-3.bin", 6: tmp_path / "parity-6.bin"}
+    for reps, path in batch_paths.items():
+        hybrid.write_batch(path, hybrid.Batch((_trace(),), (0, 1), nwarps=2, reps=reps))
+    artifact = tmp_path / "parity.json"
+    verified = hybrid.gpu_check(batch_paths, scorer, artifact, _model_root(tmp_path))
+    assert verified.coarse_batch_sha256 == hybrid.sha256_file(batch_paths[3])
+    assert verified.confirmation_batch_sha256 == hybrid.sha256_file(batch_paths[6])
 
 
 def test_watchdog_times_out_and_reaps_process_group():
@@ -201,6 +242,18 @@ def test_rental_entrypoint_is_syntax_checked_and_done_is_after_manifest_gate():
     subprocess.run(("bash", "-n", str(entrypoint)), check=True)
     source = entrypoint.read_text(encoding="utf-8")
     assert "platforms.clore" not in source and "platforms.vast" not in source
+    assert "apt-get" not in source and "pytest" not in source
+    assert "! -name run.log ! -name http.log ! -name compute-timeout.log" in source
     assert source.index('manifest.get("status") != "complete"') < source.index('mv "$DONE.tmp" "$DONE"')
     dockerfile = (root / "rental_image.Dockerfile").read_text(encoding="utf-8")
     assert dockerfile.startswith("FROM nvidia/cuda:12.6.3-devel-ubuntu24.04\n")
+
+
+def test_cli_has_no_public_unscored_export_path():
+    result = subprocess.run(
+        (sys.executable, "-m", "miner.qtc_e_model.hybrid_accel", "--help"),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "--unscored" not in result.stdout

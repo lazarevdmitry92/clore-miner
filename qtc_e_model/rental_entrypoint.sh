@@ -9,6 +9,7 @@ readonly LOG_ROOT=/var/log/qtc-e
 readonly SOURCE_ARCHIVE="$PAYLOAD/source.tar.gz"
 readonly PILOT_ARCHIVE="$PAYLOAD/pilot-s10.tar.gz"
 readonly CHECKSUMS="$PAYLOAD/SHA256SUMS"
+readonly PACKAGE_CHECKSUM="$PAYLOAD/PACKAGE.sha256"
 readonly RUN_DIR="$LOG_ROOT/run"
 readonly RUN_LOG="$LOG_ROOT/run.log"
 readonly FAILED="$LOG_ROOT/failed"
@@ -30,18 +31,8 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM HUP
 
-install_python_if_missing() {
-  if command -v python3 >/dev/null 2>&1 && python3 -m pytest --version >/dev/null 2>&1; then
-    return
-  fi
-  export DEBIAN_FRONTEND=noninteractive
-  apt-get update
-  apt-get install -y --no-install-recommends python3 python3-pytest ca-certificates
-  rm -rf /var/lib/apt/lists/*
-}
-
 start_http() {
-  python3 -m http.server 21559 --bind 0.0.0.0 --directory "$LOG_ROOT" >>"$LOG_ROOT/http.log" 2>&1 &
+  "$PYTHON_BIN" -m http.server 21559 --bind 0.0.0.0 --directory "$LOG_ROOT" >>"$LOG_ROOT/http.log" 2>&1 &
   HTTP_PID=$!
   sleep 1
   kill -0 "$HTTP_PID"
@@ -49,47 +40,60 @@ start_http() {
 
 prepare() {
   rm -f "$DONE" "$DONE.tmp" "$FAILED"
-  install_python_if_missing
+  PYTHON_BIN="$(command -v python3 || true)"
+  if [[ -z "$PYTHON_BIN" && -x /opt/python/bin/python3 ]]; then
+    PYTHON_BIN=/opt/python/bin/python3
+  fi
+  [[ -n "$PYTHON_BIN" && -x "$PYTHON_BIN" ]]
   command -v nvcc >/dev/null
   command -v sha256sum >/dev/null
-  [[ -s "$SOURCE_ARCHIVE" && -s "$PILOT_ARCHIVE" && -s "$CHECKSUMS" ]]
-  (cd "$PAYLOAD" && sha256sum --check --strict SHA256SUMS)
+  [[ -s "$SOURCE_ARCHIVE" && -s "$PILOT_ARCHIVE" && -s "$CHECKSUMS" && -s "$PACKAGE_CHECKSUM" ]]
+  (cd "$PAYLOAD" && sha256sum --check --strict PACKAGE.sha256 && sha256sum --check --strict SHA256SUMS)
+  local actual_package
+  actual_package="$(sha256sum "$CHECKSUMS" | awk '{print $1}')"
+  printf '%s\n' "$actual_package" >"$LOG_ROOT/package.sha256"
   mkdir -p "$WORK"
   tar -xzf "$SOURCE_ARCHIVE" -C "$WORK"
   tar -xzf "$PILOT_ARCHIVE" -C "$WORK"
   [[ -f "$WORK/miner/qtc_e_model/hybrid_accel.py" ]]
   [[ -f "$WORK/pilots/miner/qtc_own_miner/s10/frag/sim2.py" ]]
-  python3 -m http.server --help >/dev/null
+  "$PYTHON_BIN" -m http.server --help >/dev/null
   start_http
 }
 
 compute() {
   cd "$WORK"
   export PYTHONPATH="$WORK"
-  python3 -m pytest -q miner/qtc_e_model
+  "$PYTHON_BIN" -m miner.qtc_e_model.hybrid_accel self-check \
+    --pilot-root pilots/miner/qtc_own_miner
   nvcc -O3 -std=c++17 miner/qtc_e_model/sim2_batch.cu -o "$LOG_ROOT/qtc_sim2_batch"
   sha256sum "$LOG_ROOT/qtc_sim2_batch" >"$LOG_ROOT/qtc_sim2_batch.sha256"
 
-  python3 -m miner.qtc_e_model.hybrid_accel export \
+  "$PYTHON_BIN" -m miner.qtc_e_model.hybrid_accel export \
     --pilot-root pilots/miner/qtc_own_miner \
-    --batch "$LOG_ROOT/parity.bin" --candidates 16 --seeds 64 --reps 6
-  python3 -m miner.qtc_e_model.hybrid_accel gpu-check \
+    --batch "$LOG_ROOT/parity-reps3.bin" --candidates 8 --seeds 8 --reps 3
+  "$PYTHON_BIN" -m miner.qtc_e_model.hybrid_accel export \
     --pilot-root pilots/miner/qtc_own_miner \
-    --batch "$LOG_ROOT/parity.bin" \
+    --batch "$LOG_ROOT/parity-reps6.bin" --candidates 8 --seeds 8 --reps 6
+  "$PYTHON_BIN" -m miner.qtc_e_model.hybrid_accel gpu-check \
+    --pilot-root pilots/miner/qtc_own_miner \
+    --coarse-parity-batch "$LOG_ROOT/parity-reps3.bin" \
+    --confirmation-parity-batch "$LOG_ROOT/parity-reps6.bin" \
     --gpu-binary "$LOG_ROOT/qtc_sim2_batch" \
     --parity-artifact "$LOG_ROOT/parity.json"
 
-  python3 -m miner.qtc_e_model.hybrid_accel hybrid-search \
+  "$PYTHON_BIN" -m miner.qtc_e_model.hybrid_accel hybrid-search \
     --pilot-root pilots/miner/qtc_own_miner \
     --gpu-binary "$LOG_ROOT/qtc_sim2_batch" \
-    --parity-batch "$LOG_ROOT/parity.bin" \
+    --coarse-parity-batch "$LOG_ROOT/parity-reps3.bin" \
+    --confirmation-parity-batch "$LOG_ROOT/parity-reps6.bin" \
     --parity-artifact "$LOG_ROOT/parity.json" \
     --archive-dir "$RUN_DIR" \
     --result "$LOG_ROOT/result.json" \
     --depth 4 --width 8 --branch-budget 48 --seeds 1 \
     --timeout-seconds 1800
 
-  python3 - "$RUN_DIR/manifest.json" <<'PY'
+  "$PYTHON_BIN" - "$RUN_DIR/manifest.json" <<'PY'
 import json
 from pathlib import Path
 import sys
@@ -101,6 +105,7 @@ if not manifest.get("batches"):
     raise SystemExit("run manifest contains no scored batches")
 PY
   find "$LOG_ROOT" -type f ! -name ARTIFACTS.sha256 ! -name done ! -name 'done.tmp' ! -name failed \
+    ! -name run.log ! -name http.log ! -name compute-timeout.log \
     -print0 | sort -z | xargs -0 sha256sum >"$LOG_ROOT/ARTIFACTS.sha256"
   printf 'status=complete\nfinished_unix=%s\nmanifest_sha256=%s\n' \
     "$(date +%s)" "$(sha256sum "$RUN_DIR/manifest.json" | awk '{print $1}')" >"$DONE.tmp"
@@ -108,7 +113,7 @@ PY
 }
 
 prepare
-export WORK LOG_ROOT RUN_DIR
+export WORK LOG_ROOT RUN_DIR PYTHON_BIN
 export -f compute
 if ! timeout --signal=TERM --kill-after=10s 1800 bash -c 'set -Eeuo pipefail; compute' \
   2>"$LOG_ROOT/compute-timeout.log"; then

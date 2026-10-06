@@ -41,7 +41,7 @@ MAX_REPS = 64
 GLOBAL_SEARCH_TIMEOUT_SECONDS = 30 * 60
 COMMAND_TIMEOUT_SECONDS = 15 * 60
 PARITY_TOLERANCE = 1e-12
-PARITY_SCHEMA = "qtc-e-cuda-parity-v1"
+PARITY_SCHEMA = "qtc-e-cuda-parity-v2"
 MANIFEST_SCHEMA = "qtc-e-rental-run-v1"
 
 
@@ -70,7 +70,8 @@ class Batch:
 class VerifiedParity:
     artifact_sha256: str
     binary_sha256: str
-    batch_sha256: str
+    coarse_batch_sha256: str
+    confirmation_batch_sha256: str
     model_sha256: str
 
 
@@ -307,7 +308,8 @@ def write_batch(path: Path, batch: Batch, expected: Iterable[float] | None = Non
         output.write(struct.pack(f"<{len(values)}d", *values))
 
 
-def write_unscored_batch(path: Path, batch: Batch) -> None:
+def _write_unscored_batch(path: Path, batch: Batch) -> None:
+    """Internal production transport; only parity-gated hybrid search calls it."""
     jobs = len(batch.traces) * len(batch.seeds)
     write_batch(path, batch, (float("nan"),) * jobs)
 
@@ -338,7 +340,7 @@ def score_batch_cuda(
     index = len(manifest_entries)
     input_path = archive_dir / f"{index:03d}-{label}.batch.bin"
     output_path = archive_dir / f"{index:03d}-{label}.scores.bin"
-    write_unscored_batch(input_path, batch)
+    _write_unscored_batch(input_path, batch)
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise TimeoutError("whole hybrid search exceeded 1800s")
@@ -466,30 +468,42 @@ def create_parity_artifact(
     artifact_path: Path,
     *,
     executable: Path,
-    batch_path: Path,
+    batch_paths: dict[int, Path],
     pilot_root: Path,
-    jobs: int,
-    max_abs_difference: float,
+    results: dict[int, tuple[int, float]],
 ) -> VerifiedParity:
-    if type(jobs) is not int or jobs < 1:
-        raise ValueError("parity jobs must be a positive integer")
-    if not math.isfinite(max_abs_difference) or not 0 <= max_abs_difference <= PARITY_TOLERANCE:
-        raise ValueError("cannot attest failed or non-finite CUDA parity")
+    if set(batch_paths) != {3, 6} or set(results) != {3, 6}:
+        raise ValueError("parity suite must contain exactly reps=3 and reps=6")
+    runs = []
+    for reps in (3, 6):
+        jobs, maximum = results[reps]
+        batch, expected = read_batch(batch_paths[reps])
+        if batch.reps != reps or any(not math.isfinite(value) for value in expected):
+            raise ValueError(f"reps={reps} parity batch is not authoritative and fully scored")
+        if type(jobs) is not int or jobs != len(expected) or jobs < 1:
+            raise ValueError("parity jobs must exactly match their batch")
+        if not math.isfinite(maximum) or not 0 <= maximum <= PARITY_TOLERANCE:
+            raise ValueError("cannot attest failed or non-finite CUDA parity")
+        runs.append({
+            "reps": reps,
+            "authoritative_batch_sha256": sha256_file(batch_paths[reps]),
+            "jobs": jobs,
+            "max_abs_difference": maximum,
+        })
     payload: dict[str, object] = {
         "schema": PARITY_SCHEMA,
         "created_unix": int(time.time()),
         "gpu_binary_sha256": sha256_file(executable),
-        "authoritative_batch_sha256": sha256_file(batch_path),
         "authoritative_model_sha256": authoritative_model_sha256(pilot_root),
-        "jobs": jobs,
-        "max_abs_difference": max_abs_difference,
         "tolerance": PARITY_TOLERANCE,
+        "runs": runs,
     }
     _write_json(artifact_path, payload)
     return VerifiedParity(
         artifact_sha256=sha256_file(artifact_path),
         binary_sha256=str(payload["gpu_binary_sha256"]),
-        batch_sha256=str(payload["authoritative_batch_sha256"]),
+        coarse_batch_sha256=str(runs[0]["authoritative_batch_sha256"]),
+        confirmation_batch_sha256=str(runs[1]["authoritative_batch_sha256"]),
         model_sha256=str(payload["authoritative_model_sha256"]),
     )
 
@@ -498,7 +512,7 @@ def verify_parity_artifact(
     artifact_path: Path,
     *,
     executable: Path,
-    batch_path: Path,
+    batch_paths: dict[int, Path],
     pilot_root: Path,
 ) -> VerifiedParity:
     try:
@@ -508,68 +522,86 @@ def verify_parity_artifact(
     required = {
         "schema",
         "gpu_binary_sha256",
-        "authoritative_batch_sha256",
         "authoritative_model_sha256",
-        "jobs",
-        "max_abs_difference",
         "tolerance",
+        "runs",
     }
     if not isinstance(payload, dict) or not required <= payload.keys() or payload.get("schema") != PARITY_SCHEMA:
         raise ValueError("unsupported or incomplete parity artifact")
-    maximum = payload["max_abs_difference"]
     tolerance = payload["tolerance"]
-    if type(maximum) not in (int, float) or not math.isfinite(maximum) or maximum < 0:
-        raise ValueError("parity artifact has an invalid result")
-    if type(tolerance) not in (int, float) or tolerance != PARITY_TOLERANCE or maximum > PARITY_TOLERANCE:
+    if type(tolerance) not in (int, float) or tolerance != PARITY_TOLERANCE:
         raise ValueError("parity artifact did not pass the frozen tolerance")
+    if set(batch_paths) != {3, 6}:
+        raise ValueError("verification requires exactly reps=3 and reps=6 batches")
     actual = {
         "gpu_binary_sha256": sha256_file(executable),
-        "authoritative_batch_sha256": sha256_file(batch_path),
         "authoritative_model_sha256": authoritative_model_sha256(pilot_root),
     }
     for field, digest in actual.items():
         recorded = payload.get(field)
         if not isinstance(recorded, str) or len(recorded) != 64 or recorded != digest:
             raise ValueError(f"parity artifact {field} does not match")
-    batch, expected = read_batch(batch_path)
-    if not expected or any(not math.isfinite(value) for value in expected):
-        raise ValueError("parity artifact must bind a fully scored authoritative batch")
-    if type(payload["jobs"]) is not int or payload["jobs"] != len(batch.traces) * len(batch.seeds):
-        raise ValueError("parity artifact job count does not match its batch")
+    runs = payload["runs"]
+    if not isinstance(runs, list) or len(runs) != 2:
+        raise ValueError("parity artifact must contain two runs")
+    by_reps = {run.get("reps"): run for run in runs if isinstance(run, dict)}
+    if set(by_reps) != {3, 6}:
+        raise ValueError("parity artifact must cover exactly reps=3 and reps=6")
+    batch_hashes = {}
+    for reps in (3, 6):
+        run = by_reps[reps]
+        batch, expected = read_batch(batch_paths[reps])
+        if batch.reps != reps or not expected or any(not math.isfinite(value) for value in expected):
+            raise ValueError(f"reps={reps} parity batch is not fully scored")
+        maximum = run.get("max_abs_difference")
+        if type(maximum) not in (int, float) or not math.isfinite(maximum) or not 0 <= maximum <= PARITY_TOLERANCE:
+            raise ValueError(f"reps={reps} parity result is invalid")
+        if type(run.get("jobs")) is not int or run["jobs"] != len(expected):
+            raise ValueError(f"reps={reps} parity job count does not match")
+        digest = sha256_file(batch_paths[reps])
+        if run.get("authoritative_batch_sha256") != digest:
+            raise ValueError(f"reps={reps} parity batch hash does not match")
+        batch_hashes[reps] = digest
     return VerifiedParity(
         artifact_sha256=sha256_file(artifact_path),
         binary_sha256=actual["gpu_binary_sha256"],
-        batch_sha256=actual["authoritative_batch_sha256"],
+        coarse_batch_sha256=batch_hashes[3],
+        confirmation_batch_sha256=batch_hashes[6],
         model_sha256=actual["authoritative_model_sha256"],
     )
 
 
 def gpu_check(
-    batch_path: Path,
+    batch_paths: dict[int, Path],
     executable: Path,
     artifact_path: Path,
     pilot_root: Path,
 ) -> VerifiedParity:
-    batch, expected = read_batch(batch_path)
-    if any(not math.isfinite(value) for value in expected):
-        raise ValueError("CUDA parity requires finite authoritative references")
+    if set(batch_paths) != {3, 6}:
+        raise ValueError("CUDA parity requires exactly reps=3 and reps=6 batches")
+    results = {}
     with tempfile.TemporaryDirectory(prefix="qtc-e-parity-") as directory:
-        output = Path(directory) / "scores.bin"
-        run_with_watchdog(
-            (str(executable), str(batch_path), str(output)),
-            timeout_seconds=COMMAND_TIMEOUT_SECONDS,
-        )
-        actual = read_scores(output, len(expected))
-    maximum = max(abs(left - right) for left, right in zip(actual, expected))
-    if not math.isfinite(maximum) or maximum > PARITY_TOLERANCE:
-        raise ValueError(f"CUDA parity failed: max_abs_difference={maximum!r}")
+        root = Path(directory)
+        for reps in (3, 6):
+            batch, expected = read_batch(batch_paths[reps])
+            if batch.reps != reps or any(not math.isfinite(value) for value in expected):
+                raise ValueError(f"CUDA reps={reps} parity requires finite authoritative references")
+            output = root / f"scores-{reps}.bin"
+            run_with_watchdog(
+                (str(executable), str(batch_paths[reps]), str(output)),
+                timeout_seconds=COMMAND_TIMEOUT_SECONDS,
+            )
+            actual = read_scores(output, len(expected))
+            maximum = max(abs(left - right) for left, right in zip(actual, expected))
+            if not math.isfinite(maximum) or maximum > PARITY_TOLERANCE:
+                raise ValueError(f"CUDA reps={reps} parity failed: max_abs_difference={maximum!r}")
+            results[reps] = (len(expected), maximum)
     return create_parity_artifact(
         artifact_path,
         executable=executable,
-        batch_path=batch_path,
+        batch_paths=batch_paths,
         pilot_root=pilot_root,
-        jobs=len(expected),
-        max_abs_difference=maximum,
+        results=results,
     )
 
 
@@ -591,7 +623,10 @@ def _write_run_manifest(
         "gpu_binary": str(executable),
         "gpu_binary_sha256": verified.binary_sha256,
         "parity_artifact_sha256": verified.artifact_sha256,
-        "authoritative_batch_sha256": verified.batch_sha256,
+        "authoritative_batches_sha256": {
+            "3": verified.coarse_batch_sha256,
+            "6": verified.confirmation_batch_sha256,
+        },
         "authoritative_model_sha256": verified.model_sha256,
         "batches": entries,
     }
@@ -607,7 +642,7 @@ def hybrid_search(
     *,
     gpu_binary: Path,
     parity_artifact: Path,
-    parity_batch: Path,
+    parity_batches: dict[int, Path],
     archive_dir: Path,
     timeout_seconds: int = GLOBAL_SEARCH_TIMEOUT_SECONDS,
 ) -> dict[str, object]:
@@ -617,7 +652,7 @@ def hybrid_search(
     verified = verify_parity_artifact(
         parity_artifact,
         executable=gpu_binary,
-        batch_path=parity_batch,
+        batch_paths=parity_batches,
         pilot_root=pilot_root,
     )
     archive_dir.mkdir(parents=True, exist_ok=False)
@@ -800,6 +835,30 @@ def authoritative_scores(
     return tuple(values)
 
 
+def authoritative_self_check(pilot_root: Path) -> dict[str, object]:
+    """Exercise the real S10 model and binary codec for both search modes."""
+    adapter = PilotSearch(pilot_root, BeamConfig())
+    state = adapter.identity
+    trace = encode_state(adapter, state)
+    maxima = {}
+    with tempfile.TemporaryDirectory(prefix="qtc-e-self-check-") as directory:
+        root = Path(directory)
+        for reps in (3, 6):
+            batch = Batch((trace,), (0, 1), reps=reps)
+            expected = authoritative_scores(adapter, (state,), 2, reps=reps)
+            actual = score_batch(batch)
+            maximum = max(abs(left - right) for left, right in zip(actual, expected))
+            if not math.isfinite(maximum) or maximum > PARITY_TOLERANCE:
+                raise ValueError(f"authoritative reps={reps} self-check failed: {maximum!r}")
+            path = root / f"reps-{reps}.bin"
+            write_batch(path, batch, expected)
+            restored, restored_expected = read_batch(path)
+            if restored.reps != reps or restored_expected != expected:
+                raise ValueError(f"authoritative reps={reps} codec round trip failed")
+            maxima[str(reps)] = maximum
+    return {"self_check": "PASS", "jobs_per_reps": 2, "max_abs_difference": maxima}
+
+
 def export_frontier(
     pilot_root: Path,
     output: Path,
@@ -807,7 +866,6 @@ def export_frontier(
     seeds: int,
     *,
     reps: int = 6,
-    unscored: bool = False,
 ) -> None:
     adapter = PilotSearch(pilot_root, BeamConfig(branch_budget=max(candidates - 1, 1)))
     states = [adapter.identity]
@@ -815,45 +873,51 @@ def export_frontier(
     chosen = tuple(states[:candidates])
     traces = tuple(encode_state(adapter, state) for state in chosen)
     batch = Batch(traces, tuple(range(seeds)), reps=reps)
-    if unscored:
-        write_unscored_batch(output, batch)
-    else:
-        write_batch(output, batch, authoritative_scores(adapter, chosen, seeds, reps=reps))
+    write_batch(output, batch, authoritative_scores(adapter, chosen, seeds, reps=reps))
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("profile", "export", "check", "gpu-check", "hybrid-search"))
+    parser.add_argument("command", choices=("profile", "self-check", "export", "check", "gpu-check", "hybrid-search"))
     parser.add_argument("--pilot-root", type=Path)
     parser.add_argument("--batch", type=Path)
     parser.add_argument("--candidates", type=int, default=8)
     parser.add_argument("--seeds", type=int, default=8)
     parser.add_argument("--gpu-binary", type=Path)
     parser.add_argument("--parity-artifact", type=Path)
-    parser.add_argument("--parity-batch", type=Path)
+    parser.add_argument("--coarse-parity-batch", type=Path)
+    parser.add_argument("--confirmation-parity-batch", type=Path)
     parser.add_argument("--archive-dir", type=Path)
     parser.add_argument("--result", type=Path)
-    parser.add_argument("--unscored", action="store_true")
     parser.add_argument("--reps", type=int, default=6)
     parser.add_argument("--depth", type=int, default=4)
     parser.add_argument("--width", type=int, default=8)
     parser.add_argument("--branch-budget", type=int, default=48)
     parser.add_argument("--timeout-seconds", type=int, default=GLOBAL_SEARCH_TIMEOUT_SECONDS)
     args = parser.parse_args()
-    if args.command in {"profile", "export", "gpu-check", "hybrid-search"} and args.pilot_root is None:
-        parser.error("profile/export/gpu-check/hybrid-search require --pilot-root")
-    if args.command in {"export", "check", "gpu-check"} and args.batch is None:
-        parser.error("export/check/gpu-check require --batch")
+    if args.command in {"profile", "self-check", "export", "gpu-check", "hybrid-search"} and args.pilot_root is None:
+        parser.error("profile/self-check/export/gpu-check/hybrid-search require --pilot-root")
+    if args.command in {"export", "check"} and args.batch is None:
+        parser.error("export/check require --batch")
     if args.command in {"gpu-check", "hybrid-search"} and args.gpu_binary is None:
         parser.error("gpu-check/hybrid-search requires --gpu-binary")
-    if args.command == "gpu-check" and args.parity_artifact is None:
-        parser.error("gpu-check requires --parity-artifact")
+    if args.command == "gpu-check" and any(value is None for value in (
+        args.parity_artifact, args.coarse_parity_batch, args.confirmation_parity_batch
+    )):
+        parser.error("gpu-check requires --parity-artifact and both parity batches")
     if args.command == "hybrid-search" and any(
-        value is None for value in (args.parity_artifact, args.parity_batch, args.archive_dir)
+        value is None for value in (
+            args.parity_artifact,
+            args.coarse_parity_batch,
+            args.confirmation_parity_batch,
+            args.archive_dir,
+        )
     ):
-        parser.error("hybrid-search requires --parity-artifact, --parity-batch and --archive-dir")
+        parser.error("hybrid-search requires --parity-artifact, both parity batches and --archive-dir")
     if args.command == "profile":
         print(json.dumps(dataclasses.asdict(profile(args.pilot_root, args.candidates, args.seeds)), indent=2))
+    elif args.command == "self-check":
+        print(json.dumps(authoritative_self_check(args.pilot_root), indent=2))
     elif args.command == "export":
         export_frontier(
             args.pilot_root,
@@ -861,7 +925,6 @@ def main() -> None:
             args.candidates,
             args.seeds,
             reps=args.reps,
-            unscored=args.unscored,
         )
     elif args.command == "check":
         batch, expected = read_batch(args.batch)
@@ -874,7 +937,12 @@ def main() -> None:
         if not passes:
             raise SystemExit(1)
     elif args.command == "gpu-check":
-        verified = gpu_check(args.batch, args.gpu_binary, args.parity_artifact, args.pilot_root)
+        verified = gpu_check(
+            {3: args.coarse_parity_batch, 6: args.confirmation_parity_batch},
+            args.gpu_binary,
+            args.parity_artifact,
+            args.pilot_root,
+        )
         print(json.dumps({"parity": "PASS", **dataclasses.asdict(verified)}, indent=2))
     else:
         config = BeamConfig(
@@ -889,7 +957,7 @@ def main() -> None:
             config,
             gpu_binary=args.gpu_binary,
             parity_artifact=args.parity_artifact,
-            parity_batch=args.parity_batch,
+            parity_batches={3: args.coarse_parity_batch, 6: args.confirmation_parity_batch},
             archive_dir=args.archive_dir,
             timeout_seconds=args.timeout_seconds,
         )

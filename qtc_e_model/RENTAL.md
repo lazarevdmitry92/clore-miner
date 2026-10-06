@@ -46,44 +46,48 @@ but use at least 256 jobs per batch for stable GPU occupancy.
 - Price ceiling: `$2.00/hour`; planned reservation 30 minutes; hard compute
   budget `$1.00`. The coordinator must record live price and planned duration
   before launch and must not take a profitable current-fleet server.
-- Expected: build+parity 5--10 minutes; full three-start search 5--15 minutes;
-  hard timeout 30 minutes. Watchdog interval: 15 seconds.
+- Expected: self-check+build+two-mode parity 5--10 minutes; the packaged
+  single deterministic depth-4 accelerator validation/current-search
+  reproduction 5--15 minutes. It is not the three independent starts already
+  used for the schedule-family saturation decision. Hard timeout 30 minutes;
+  watchdog interval 15 seconds.
 
 ## Build, parity, and search on the rental
 
 From the repository root on the rental host:
 
 ```sh
-python3.11 -m pytest -q miner/qtc_e_model
+python3.11 -m miner.qtc_e_model.hybrid_accel self-check \
+  --pilot-root pilots/miner/qtc_own_miner
 nvcc -O3 -std=c++17 miner/qtc_e_model/sim2_batch.cu -o /tmp/qtc_sim2_batch
 python3.11 -m miner.qtc_e_model.hybrid_accel export \
   --pilot-root pilots/miner/qtc_own_miner \
-  --batch /tmp/qtc_e_parity.bin --candidates 16 --seeds 64 --reps 6
+  --batch /tmp/qtc_e_parity_reps3.bin --candidates 8 --seeds 8 --reps 3
+python3.11 -m miner.qtc_e_model.hybrid_accel export \
+  --pilot-root pilots/miner/qtc_own_miner \
+  --batch /tmp/qtc_e_parity_reps6.bin --candidates 8 --seeds 8 --reps 6
 python3.11 -m miner.qtc_e_model.hybrid_accel gpu-check \
   --pilot-root pilots/miner/qtc_own_miner \
-  --batch /tmp/qtc_e_parity.bin --gpu-binary /tmp/qtc_sim2_batch \
+  --coarse-parity-batch /tmp/qtc_e_parity_reps3.bin \
+  --confirmation-parity-batch /tmp/qtc_e_parity_reps6.bin \
+  --gpu-binary /tmp/qtc_sim2_batch \
   --parity-artifact /tmp/qtc_e_parity.json
 ```
 
-Only after `parity=PASS`, export an unscored production frontier and score it:
-
-```sh
-python3.11 -m miner.qtc_e_model.hybrid_accel export \
-  --pilot-root pilots/miner/qtc_own_miner \
-  --batch /tmp/qtc_e_frontier.bin --candidates 256 --seeds 64 --unscored
-/tmp/qtc_sim2_batch /tmp/qtc_e_frontier.bin /tmp/qtc_e_scores.bin
-```
-
-The end-to-end hybrid optimizer batches every beam level and the 64-seed
-confirmation while retaining branching/recolor/pruning on CPU:
+There is no public unscored-export command. Only the end-to-end hybrid
+optimizer can create a production batch, after verifying both parity modes;
+it batches every beam level and the 64-seed confirmation while retaining
+branching/recolor/pruning on CPU:
 
 ```sh
 python3.11 -m miner.qtc_e_model.hybrid_accel hybrid-search \
   --pilot-root pilots/miner/qtc_own_miner \
   --gpu-binary /tmp/qtc_sim2_batch \
-  --parity-batch /tmp/qtc_e_parity.bin \
+  --coarse-parity-batch /tmp/qtc_e_parity_reps3.bin \
+  --confirmation-parity-batch /tmp/qtc_e_parity_reps6.bin \
   --parity-artifact /tmp/qtc_e_parity.json \
   --archive-dir /tmp/qtc-e-run-001 \
+  --result /tmp/qtc-e-result.json \
   --depth 4 --width 8 --branch-budget 48 --seeds 1
 ```
 
@@ -97,7 +101,8 @@ heartbeat every 15 seconds while a child is running.
 
 Every input batch and output score file stays under `--archive-dir`; a
 `manifest.json` records their SHA-256 hashes, dimensions, `reps`, the exact
-binary/parity/model bindings, and terminal `complete` or `failed` status.
+binary/model and authoritative reps=3+reps=6 parity bindings, and terminal
+`complete` or `failed` status.
 Non-finite CUDA output, malformed dimensions, trailing/truncated bytes,
 invalid trace fields, or stored offsets inconsistent with the seeds all fail
 closed before a result can enter beam selection.
@@ -106,15 +111,22 @@ closed before a result can enter beam selection.
 
 [`rental_entrypoint.sh`](rental_entrypoint.sh) is the only container
 entrypoint. Its base is `nvidia/cuda:12.6.3-devel-ubuntu24.04`; the equivalent
-build recipe is [`rental_image.Dockerfile`](rental_image.Dockerfile). Python 3,
-pytest, and CA roots are installed into the immutable image layer; the
-entrypoint has a fail-closed apt fallback only when Python is unexpectedly
-absent. The payload is:
+build recipe is [`rental_image.Dockerfile`](rental_image.Dockerfile). Python 3
+is part of the immutable image: the Docker route installs it at build time;
+the crane route appends a pinned Linux x86_64 standalone CPython under
+`/opt/python`. The entrypoint makes no package-manager or network call and
+fails before computation if Python or nvcc is absent. The payload is:
 
 - `source.tar.gz`: `git archive` of `miner/qtc_e_model` at one exact commit;
 - `pilot-s10.tar.gz`: the ignored authoritative `qtc_own_miner/s10` tree,
   stored with path `pilots/miner/qtc_own_miner/s10/...`;
-- the entrypoint from the same commit and `SHA256SUMS` covering all three.
+- the entrypoint from the same commit and `SHA256SUMS` covering all three;
+- `PACKAGE.sha256`, the SHA-256 of `SHA256SUMS` itself.
+
+The entrypoint verifies `PACKAGE.sha256` and then every entry in `SHA256SUMS`
+before extraction, and publishes the package digest with the results. The
+reviewed image digest binds that package layer externally; no runtime env
+value can substitute another package or create brittle runner coupling.
 
 At startup the entrypoint verifies checksums, extracts into a new work area,
 starts a read-only HTTP endpoint on 21559, builds the CUDA scorer, produces the
@@ -122,7 +134,10 @@ authoritative parity attestation, and runs the hybrid search. Logs and all
 artifacts are under `/var/log/qtc-e`; HTTP paths are `/run.log`, `/failed`,
 `/result.json`, `/run/manifest.json`, and `/done`. It writes `/done` atomically
 only after `manifest.json` says `complete` and the artifact checksum inventory
-has been written. Failure is never retried; `/failed` is written and the
+has been written. That inventory deliberately excludes the live HTTP access
+log, combined run log, timeout log, `/done`, and `/failed`; all included model,
+parity, batch, result, and manifest files are closed and stable. Failure is
+never retried; `/failed` is written and the
 container idles so atlas can collect evidence and terminate the rental. The
 container contains no platform client and makes no project/API request.
 
@@ -138,21 +153,23 @@ collector's current market data.
    commit. Record their SHA-256 values; never package an uncommitted checkout.
 2. Require an immutable project-owned CUDA-devel qtcbench image in the form
    `ghcr.io/lazarevdmitry92/clore-miner:qtcbench-cuda-<40-hex>@sha256:<64-hex>`.
-   Build/publish by appending the prepared payload layer to the pinned base
-   with crane, set this entrypoint, then inspect and record the resulting
-   digest. A mutable tag, plain CUDA image, or digest mismatch is a no-go.
+   Build with the checked Docker recipe, or append both the prepared payload
+   and pinned standalone-CPython layers to the pinned CUDA base with crane.
+   Set this entrypoint, then inspect and record the resulting digest. A mutable
+   tag, plain CUDA image, runtime Python install, or digest mismatch is a no-go.
 3. The current primary candidate is Clore `69333` (snapshot: owner 4727, one
    RTX 4090 410 W, reliability 1.0, `below_roi`, about `$8.84/day`). Immediately
    before placement, re-read the collector snapshot and recheck: still free,
    same owner/card, no ban, no current order, fleet margin not above `$1/day`,
    and projected 35-minute spend within the pilot budget. Any mismatch aborts.
-4. Open it in pilot `qtc_own_miner`, `until=35m`, `exempt_from=all`, only by the
-   public `ops.market_actions.place` action on atlas. Pass the exact immutable
-   image, `coin="qtc"`, and a known miner profile only to obtain the standard
-   log port; the image entrypoint ignores mining env. Do not call
-   `platforms.clore` directly and do not request SSH. First print and review
-   the resolved server, price, currency, image digest, pilot and deadline;
-   only the confirmed path may call `place`.
+4. Use the reviewed atlas rental runner (prepared independently with its own
+   tests), not a claimed `ops.test_order --image` CLI that does not exist. Its
+   only placement call is public `ops.market_actions.place`: pilot
+   `qtc_own_miner`, `until=35m`, `exempt_from=all`, the exact immutable image,
+   `coin="qtc"`, and a known miner profile for port 21559. It prints and
+   validates the image tag/digest and plan before its explicit `--yes` path.
+   It does not import a platform client, request SSH, or use an existing
+   rental.
 5. Wait for the collector to bind the returned order to pilot `qtc_own_miner`
    and discover the mapped 21559 endpoint from that order snapshot. Never
    guess or reuse an endpoint. Poll `/run.log`, `/failed`, and `/done`; collect
