@@ -7,7 +7,7 @@ readonly PAYLOAD=/opt/qtc-e
 readonly WORK=/work/qtc-e
 readonly LOG_ROOT=/var/log/qtc-e
 readonly SOURCE_ARCHIVE="$PAYLOAD/source.tar.gz"
-readonly PILOT_ARCHIVE="$PAYLOAD/pilot-s10.tar.gz"
+readonly PILOT_ARCHIVE="$PAYLOAD/pilot-model.tar.gz"
 readonly CHECKSUMS="$PAYLOAD/SHA256SUMS"
 readonly PACKAGE_CHECKSUM="$PAYLOAD/PACKAGE.sha256"
 readonly RUN_DIR="$LOG_ROOT/run"
@@ -48,6 +48,28 @@ prepare() {
   command -v nvcc >/dev/null
   command -v sha256sum >/dev/null
   [[ -s "$SOURCE_ARCHIVE" && -s "$PILOT_ARCHIVE" && -s "$CHECKSUMS" && -s "$PACKAGE_CHECKSUM" ]]
+  "$PYTHON_BIN" - "$CHECKSUMS" "$PACKAGE_CHECKSUM" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+def inventory(path):
+    rows = []
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        match = re.fullmatch(r"[0-9a-fA-F]{64} ([ *])(.+)", line)
+        if match is None:
+            raise SystemExit(f"invalid checksum inventory line in {path!r}")
+        rows.append(match.group(2))
+    return rows
+
+checksums = inventory(sys.argv[1])
+expected = {"source.tar.gz", "pilot-model.tar.gz", "rental_entrypoint.sh"}
+if len(checksums) != len(expected) or set(checksums) != expected:
+    raise SystemExit("SHA256SUMS must cover exactly the source, pilot model, and entrypoint")
+package = inventory(sys.argv[2])
+if package != ["SHA256SUMS"]:
+    raise SystemExit("PACKAGE.sha256 must cover exactly SHA256SUMS")
+PY
   (cd "$PAYLOAD" && sha256sum --check --strict PACKAGE.sha256 && sha256sum --check --strict SHA256SUMS)
   local actual_package
   actual_package="$(sha256sum "$CHECKSUMS" | awk '{print $1}')"
@@ -57,6 +79,10 @@ prepare() {
   tar -xzf "$PILOT_ARCHIVE" -C "$WORK"
   [[ -f "$WORK/miner/qtc_e_model/hybrid_accel.py" ]]
   [[ -f "$WORK/pilots/miner/qtc_own_miner/s10/frag/sim2.py" ]]
+  [[ -f "$WORK/pilots/miner/qtc_own_miner/s10/tools/guard.py" ]]
+  [[ -f "$WORK/pilots/miner/qtc_own_miner/s10/tools/sass_ir.py" ]]
+  [[ -f "$WORK/pilots/miner/qtc_own_miner/s10/tools/lat_sm70.json" ]]
+  [[ -f "$WORK/pilots/miner/qtc_own_miner/s6/s7/mining_n1n3s3e.cu" ]]
   "$PYTHON_BIN" -m http.server --help >/dev/null
   start_http
 }

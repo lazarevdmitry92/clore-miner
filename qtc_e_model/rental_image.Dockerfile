@@ -6,8 +6,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # Prepared outside the image from one exact mining commit. SOURCE_ARCHIVE is a
-# git archive; PILOT_ARCHIVE contains only the ignored authoritative S10 input.
-COPY source.tar.gz pilot-s10.tar.gz SHA256SUMS PACKAGE.sha256 /opt/qtc-e/
+# git archive; PILOT_ARCHIVE contains S10 plus its required S6/S7 kernel input.
+COPY source.tar.gz pilot-model.tar.gz SHA256SUMS PACKAGE.sha256 /opt/qtc-e/
 COPY rental_entrypoint.sh /opt/qtc-e/rental_entrypoint.sh
 RUN chmod 0555 /opt/qtc-e/rental_entrypoint.sh \
     && cd /opt/qtc-e \

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import math
+import os
 from pathlib import Path
 import struct
 import subprocess
 import sys
+import tarfile
 
 import pytest
 
@@ -120,9 +122,10 @@ def test_read_scores_rejects_nonfinite_cuda_output(tmp_path: Path):
 
 def _model_root(tmp_path: Path) -> Path:
     root = tmp_path / "pilot"
-    source = root / "s10" / "frag" / "sim2.py"
-    source.parent.mkdir(parents=True)
-    source.write_text("# authoritative test model\n", encoding="utf-8")
+    for relative in hybrid.AUTHORITATIVE_PILOT_SOURCES:
+        source = root / relative
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text(f"# authoritative test model: {relative}\n", encoding="utf-8")
     return root
 
 
@@ -159,6 +162,18 @@ def test_parity_artifact_binds_exact_binary_batch_and_model(tmp_path: Path):
         )
 
     binary.write_bytes(b"binary-v1")
+    control_model = pilot_root / "s10" / "tools" / "lat_sm70.json"
+    original_control_model = control_model.read_text(encoding="utf-8")
+    control_model.write_text(original_control_model + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="authoritative_model_sha256"):
+        hybrid.verify_parity_artifact(
+            artifact,
+            executable=binary,
+            batch_paths=batch_paths,
+            pilot_root=pilot_root,
+        )
+    control_model.write_text(original_control_model, encoding="utf-8")
+
     batch_paths[3].write_bytes(batch_paths[3].read_bytes()[:-1] + b"x")
     with pytest.raises(ValueError, match="reps=3 parity batch hash"):
         hybrid.verify_parity_artifact(
@@ -236,6 +251,45 @@ def test_encoded_real_trace_matches_authoritative_sim2_for_coarse_and_confirmati
             assert encoded == pytest.approx(authoritative, abs=1e-12)
 
 
+def test_self_check_runs_from_extracted_minimal_pilot_payload(tmp_path: Path):
+    pilot_root = _authoritative_pilot_root()
+    if pilot_root is None:
+        pytest.skip("ignored authoritative S10 pilot is not installed")
+    kernel = pilot_root / "s6" / "s7" / "mining_n1n3s3e.cu"
+    if not kernel.is_file():
+        pytest.fail(f"authoritative S6/S7 dependency is missing: {kernel}")
+
+    archive = tmp_path / "pilot-model.tar.gz"
+    prefix = Path("pilots/miner/qtc_own_miner")
+    with tarfile.open(archive, "w:gz") as output:
+        output.add(pilot_root / "s10", arcname=prefix / "s10")
+        output.add(kernel, arcname=prefix / "s6/s7/mining_n1n3s3e.cu")
+    extracted = tmp_path / "extracted"
+    extracted.mkdir()
+    with tarfile.open(archive, "r:gz") as source:
+        source.extractall(extracted, filter="data")
+
+    repo = Path(__file__).resolve().parents[2]
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(repo)
+    result = subprocess.run(
+        (
+            sys.executable,
+            "-m",
+            "miner.qtc_e_model.hybrid_accel",
+            "self-check",
+            "--pilot-root",
+            str(extracted / prefix),
+        ),
+        cwd=repo,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert '"self_check": "PASS"' in result.stdout
+
+
 def test_rental_entrypoint_is_syntax_checked_and_done_is_after_manifest_gate():
     root = Path(__file__).parent
     entrypoint = root / "rental_entrypoint.sh"
@@ -243,10 +297,14 @@ def test_rental_entrypoint_is_syntax_checked_and_done_is_after_manifest_gate():
     source = entrypoint.read_text(encoding="utf-8")
     assert "platforms.clore" not in source and "platforms.vast" not in source
     assert "apt-get" not in source and "pytest" not in source
+    assert 'pilot-model.tar.gz' in source
+    assert 's6/s7/mining_n1n3s3e.cu' in source
+    assert all(name in source for name in ("tools/guard.py", "tools/sass_ir.py", "tools/lat_sm70.json"))
     assert "! -name run.log ! -name http.log ! -name compute-timeout.log" in source
     assert source.index('manifest.get("status") != "complete"') < source.index('mv "$DONE.tmp" "$DONE"')
     dockerfile = (root / "rental_image.Dockerfile").read_text(encoding="utf-8")
     assert dockerfile.startswith("FROM nvidia/cuda:12.6.3-devel-ubuntu24.04\n")
+    assert "pilot-model.tar.gz" in dockerfile and "pilot-s10.tar.gz" not in dockerfile
 
 
 def test_cli_has_no_public_unscored_export_path():

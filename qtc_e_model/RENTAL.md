@@ -39,10 +39,15 @@ but use at least 256 jobs per batch for stable GPU occupancy.
 
 ## Rental specification and budget gate
 
-- Preferred: one RTX 4090 24 GB, CUDA 12.x, at least 24 vCPU and 32 GB RAM.
-- Acceptable fallback: L40S 48 GB with the same CPU/RAM floor.
-- Disk: 10 GB. No target V100 is required: this GPU only evaluates the V100
-  simulator state machine.
+- Executable hardware gate: exactly one RTX 4090 24 GB. The immutable image
+  supplies CUDA 12.x. No target V100 is required: this GPU only evaluates the
+  V100 simulator state machine. There is no L40S fallback in the reviewed
+  runner.
+- Host sizing preference/estimate: at least 24 vCPU, 32 GB RAM, and 10 GB
+  disk. The current collector snapshot and public placement runner cannot
+  prove those fields, so they are not claimed as pre-rent acceptance gates.
+  If the platform later exposes them, promote them to executable checks;
+  otherwise an insufficient host fails the run and the watchdog tears it down.
 - Price ceiling: `$2.00/hour`; planned reservation 30 minutes; hard compute
   budget `$1.00`. The coordinator must record live price and planned duration
   before launch and must not take a profitable current-fleet server.
@@ -118,13 +123,30 @@ the crane route appends a pinned Linux x86_64 standalone CPython under
 fails before computation if Python or nvcc is absent. The payload is:
 
 - `source.tar.gz`: `git archive` of `miner/qtc_e_model` at one exact commit;
-- `pilot-s10.tar.gz`: the ignored authoritative `qtc_own_miner/s10` tree,
-  stored with path `pilots/miner/qtc_own_miner/s10/...`;
+- `pilot-model.tar.gz`: the ignored authoritative `qtc_own_miner/s10` tree
+  plus `qtc_own_miner/s6/s7/mining_n1n3s3e.cu`. Preserve their repository
+  paths under `pilots/miner/qtc_own_miner/...`; S10's `ref.py` loads that
+  kernel source while `gen -> ana -> frame -> ref` is imported, so an S10-only
+  archive is invalid. The complete S10 tree is also required because `gen.py`
+  loads `tools/guard.py`, `tools/sass_ir.py`, and `tools/lat_sm70.json` as
+  active schedule/control inputs;
 - the entrypoint from the same commit and `SHA256SUMS` covering all three;
 - `PACKAGE.sha256`, the SHA-256 of `SHA256SUMS` itself.
 
+Prepare the model archive from the pilot repository root; do not replace the
+two explicit inputs with a glob or an S10-only archive:
+
+```sh
+tar -czf pilot-model.tar.gz \
+  pilots/miner/qtc_own_miner/s10 \
+  pilots/miner/qtc_own_miner/s6/s7/mining_n1n3s3e.cu
+sha256sum source.tar.gz pilot-model.tar.gz rental_entrypoint.sh >SHA256SUMS
+sha256sum SHA256SUMS >PACKAGE.sha256
+```
+
 The entrypoint verifies `PACKAGE.sha256` and then every entry in `SHA256SUMS`
-before extraction, and publishes the package digest with the results. The
+before extraction, requires both the S10 simulator and its S6/S7 kernel source,
+and publishes the package digest with the results. The
 reviewed image digest binds that package layer externally; no runtime env
 value can substitute another package or create brittle runner coupling.
 
@@ -162,14 +184,32 @@ collector's current market data.
    before placement, re-read the collector snapshot and recheck: still free,
    same owner/card, no ban, no current order, fleet margin not above `$1/day`,
    and projected 35-minute spend within the pilot budget. Any mismatch aborts.
-4. Use the reviewed atlas rental runner (prepared independently with its own
-   tests), not a claimed `ops.test_order --image` CLI that does not exist. Its
-   only placement call is public `ops.market_actions.place`: pilot
+4. Use the versioned runner at repository path
+   `miner/qtc_e_model/rental_runner/`, which is
+   `~/mining/miner/qtc_e_model/rental_runner/` on atlas. Require
+   `RUNNER_SHA256SUMS` digest
+   `28319af18dee3c1c2f477f7e90f1e6d7dcf57500ae9f7543eedeb84582d9842c`;
+   the runner verifies that inventory and records it in `plan.json` and
+   `state.json`. From `~/mining`, first produce the no-action plan, review it,
+   then use a new output directory and add `--yes`:
+
+   ```sh
+   python3.11 miner/qtc_e_model/rental_runner/qtc_rental.py \
+     --project-root "$PWD" \
+     --server 69333 --expected-owner 4727 \
+     --runner-inventory-sha256 28319af18dee3c1c2f477f7e90f1e6d7dcf57500ae9f7543eedeb84582d9842c \
+     --image 'ghcr.io/lazarevdmitry92/clore-miner:qtcbench-cuda-<40hex>@sha256:<64hex>' \
+     --output /tmp/qtc-e-atlas-plan
+   ```
+
+   The exact reviewed contract is in
+   [`rental_runner/README.md`](rental_runner/README.md). Do not use a claimed
+   `ops.test_order --image` CLI that does not exist. The runner's only
+   placement call is public `ops.market_actions.place`: pilot
    `qtc_own_miner`, `until=35m`, `exempt_from=all`, the exact immutable image,
-   `coin="qtc"`, and a known miner profile for port 21559. It prints and
-   validates the image tag/digest and plan before its explicit `--yes` path.
-   It does not import a platform client, request SSH, or use an existing
-   rental.
+   `coin="qtc"`, and port 21559. It validates the image tag/digest and plan
+   before the explicit `--yes` path. It does not import a platform client,
+   request SSH, or use an existing rental.
 5. Wait for the collector to bind the returned order to pilot `qtc_own_miner`
    and discover the mapped 21559 endpoint from that order snapshot. Never
    guess or reuse an endpoint. Poll `/run.log`, `/failed`, and `/done`; collect

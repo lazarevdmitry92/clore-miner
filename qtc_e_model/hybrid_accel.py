@@ -43,6 +43,21 @@ COMMAND_TIMEOUT_SECONDS = 15 * 60
 PARITY_TOLERANCE = 1e-12
 PARITY_SCHEMA = "qtc-e-cuda-parity-v2"
 MANIFEST_SCHEMA = "qtc-e-rental-run-v1"
+AUTHORITATIVE_PILOT_SOURCES = (
+    "s10/frag/ana.py",
+    "s10/frag/body_io.py",
+    "s10/frag/frame.py",
+    "s10/frag/gen.py",
+    "s10/frag/isa.py",
+    "s10/frag/partial.py",
+    "s10/frag/ref.py",
+    "s10/frag/sassio.py",
+    "s10/frag/sim2.py",
+    "s10/tools/guard.py",
+    "s10/tools/sass_ir.py",
+    "s10/tools/lat_sm70.json",
+    "s6/s7/mining_n1n3s3e.cu",
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -101,18 +116,19 @@ def sha256_file(path: Path) -> str:
 
 def authoritative_model_sha256(pilot_root: Path) -> str:
     """Hash every source that defines the authoritative score contract."""
-    paths = (
-        Path(__file__),
-        Path(__file__).with_name("optimizer_e4.py"),
-        Path(__file__).with_name("fused_reduction.py"),
-        pilot_root / "s10" / "frag" / "sim2.py",
+    sources = (
+        ("miner/qtc_e_model/hybrid_accel.py", Path(__file__)),
+        ("miner/qtc_e_model/optimizer_e4.py", Path(__file__).with_name("optimizer_e4.py")),
+        ("miner/qtc_e_model/fused_reduction.py", Path(__file__).with_name("fused_reduction.py")),
+        *((f"pilots/miner/qtc_own_miner/{relative}", pilot_root / relative)
+          for relative in AUTHORITATIVE_PILOT_SOURCES),
     )
     digest = hashlib.sha256()
-    for path in paths:
+    for label, path in sources:
         if not path.is_file():
             raise FileNotFoundError(f"authoritative model source is missing: {path}")
         data = path.read_bytes()
-        name = path.name.encode("utf-8")
+        name = label.encode("utf-8")
         digest.update(struct.pack("<I", len(name)))
         digest.update(name)
         digest.update(struct.pack("<Q", len(data)))
