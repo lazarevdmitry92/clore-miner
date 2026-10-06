@@ -34,18 +34,19 @@ def test_fused_fold_matches_materialized_for_random_words():
         assert model.fold_words_fused(low, high, r3) == model.fold_words_materialized(low, high, r3)
 
 
-def test_partial_candidate_passes_model_gate_and_constraints():
+def test_fused_linear_candidate_passes_model_gate_and_constraints():
     candidate = model.build_report().candidate
-    assert candidate.instructions_removed_per_nonce == 528
+    assert candidate.instructions_removed_per_nonce == 672
+    assert candidate.full_f == 1080
     assert candidate.partial_f == 334
     assert candidate.partial_a == 336
     assert candidate.registers == 64
     assert candidate.predicates == 6
     assert candidate.scoreboards == 6
     assert candidate.spills == 0
-    assert candidate.physics_ed == pytest.approx(1.0198986887600312)
-    assert candidate.corrected_ed == pytest.approx(1.0226021886666754)
-    assert candidate.lcb95_ed == pytest.approx(1.0115150633202001)
+    assert candidate.physics_ed == pytest.approx(1.0377323297265648)
+    assert candidate.corrected_ed == pytest.approx(1.0429092077887785)
+    assert candidate.lcb95_ed == pytest.approx(1.031095919285345)
     assert candidate.passes_gate
 
 

@@ -2,9 +2,10 @@
 """Model and generate the V100 QTC E fused-reduction candidate.
 
 The candidate removes the temporary ``c = r3 + k`` instruction from every
-partial-round output fold.  The low-word subtraction consumes ``!k``
-directly and produces the no-borrow predicate used by the high word.  This is
-an arithmetic change, not a rescheduling of D.
+partial-round output fold and selected full-round linear outputs.  The
+low-word subtraction consumes ``!k`` directly and produces the no-borrow
+predicate used by the high word.  This is an arithmetic change plus a
+separately optimized schedule, not a permutation of D's arithmetic forms.
 
 The pure functions and report are self-contained.  ``--write-sass`` is an
 optional adapter for the ignored S10 pilot: it patches the existing IR builder
@@ -244,19 +245,22 @@ def project(
 
 
 def build_report(anchor: Anchor = Anchor()) -> Report:
-    # Real S10 scheduler/allocator result, eight deterministic sim2 seeds.
+    # Best feasible point found by the bounded search in optimizer_v3.  Raw
+    # simulator deltas are normalized to the measured D anchors so the model
+    # does not confuse simulator bias with an E/D effect.
     candidate = project(
-        fused_full_outputs=0,
+        fused_full_outputs=9,
         fused_partial_outputs=12,
-        full_cycles=anchor.full_cycles,
-        partial_cycles=379.24000724755894,
-        # The fused partial body alone is 60/5/1.  The unchanged D full body
-        # fixes the whole combined body at its existing 64/6/6 ceiling.
+        full_cycles=1248.6289419421269,
+        partial_cycles=363.74544839988715,
+        # Both generated bodies remain within D's existing whole-kernel
+        # 64/6/6 ceiling.
         registers=64,
         predicates=6,
         scoreboards=6,
         spills=0,
         anchor=anchor,
+        name="E2-fused-linear",
     )
 
     # Every fusion removes one F-pipe IMAD.X and 8.1 pJ while leaving A work
@@ -297,7 +301,10 @@ def build_report(anchor: Anchor = Anchor()) -> Report:
         arithmetic_identity="lo-r3-k = lo+~r3+!k; hi'=hi+k-borrow",
         candidate=candidate,
         certificate=certificate,
-        decision="MODEL-GO: bit-exact partial fusion passes the model gate; requires SASS and GPU gates",
+        decision=(
+            "MODEL-GO: bit-exact fused-linear candidate passes the model gate; "
+            "central exceeds +4%, LCB95 does not; requires SASS and GPU gates"
+        ),
     )
 
 
@@ -308,6 +315,53 @@ def _patch_pilot(pilot_root: Path):
     sys.path.insert(0, str(frag))
     gen = importlib.import_module("gen")
     partial = importlib.import_module("partial")
+
+    full_fused = frozenset((0, 4, 5, 6, 7, 8, 9, 10, 11))
+    full_index = 0
+    original_out_fold = gen.out_fold
+
+    def selective_full_fold(block, y, s, rcp, chain, out0, out1):
+        nonlocal full_index
+        index = full_index
+        full_index += 1
+        if index not in full_fused:
+            return original_out_fold(block, y, s, rcp, chain, out0, out1)
+        w = gen.Pair("w")
+        lane = gen.add3_ll(block, y, s, (rcp.lo, rcp.hi, None), chain, dst=w)
+        pk, pb = gen.VP("k"), gen.VP("b")
+        block.op(
+            "IMAD.WIDE.U32",
+            [("dp", w), ("pd", pk), ("s", lane[2]), gen.L(gen.EPS), ("sp", w)],
+            "W",
+            chain,
+        )
+        block.op(
+            "IADD3.X",
+            [
+                ("d", out0),
+                ("pd", pb),
+                ("s", w.lo),
+                gen.L("-0x1"),
+                gen.L("RZ"),
+                ("ps", pk, True),
+                ("plit", "!PT"),
+            ],
+            "A",
+            chain,
+        )
+        block.op(
+            "IADD3.X",
+            [
+                ("d", out1),
+                gen.L("RZ"),
+                gen.L("-0x1"),
+                ("s", w.hi),
+                ("ps", pb, False),
+                ("ps", pk, False),
+            ],
+            "A",
+            chain,
+        )
 
     def fused_fold_out(block, chain, low_pair, r2, r3, out0, out1, _cform, r3zero=False):
         pk, pb = gen.VP("k"), gen.VP("b")
@@ -346,6 +400,7 @@ def _patch_pilot(pilot_root: Path):
             chain,
         )
 
+    gen.out_fold = selective_full_fold
     partial.fold_out = fused_fold_out
     return gen, partial, importlib.import_module("body_io")
 
@@ -354,14 +409,28 @@ def write_partial_sass(pilot_root: Path, output: Path) -> None:
     gen, partial, body_io = _patch_pilot(pilot_root)
     opts = gen.Opts(lam=0.35, w_imb=4.0, w_stall=1.5, window=2, ldc_max=2, rho=1.0, w_h=0.02, w_chain=3.0)
     full, labels, _blocks = gen.generate("L", lambda _i: ("F",) * 6, opts_s=opts, opts_m=opts)
-    loop, _loop_labels, _block = partial.generate(cforms=lambda _i: "F")
+    partial_opts = gen.Opts(
+        lam=0.1,
+        w_imb=4.0,
+        w_stall=0.5,
+        w_h=0.05,
+        w_chain=1.0,
+        w_press=0.0,
+        rho=1.0,
+        window=7,
+        regs=57,
+    )
+    loop, _loop_labels, _block = partial.generate(cforms=lambda _i: "F", opts=partial_opts)
     labels = dict(labels, **{".L_x_9": len(full)})
     output.parent.mkdir(parents=True, exist_ok=True)
     body_io.write(
         str(output),
         full + loop,
         labels,
-        header="QTC E model candidate: D full body + fused carry correction in all 12 partial-round outputs",
+        header=(
+            "QTC E2 model candidate: fused carry correction in full outputs "
+            "0,4,5,6,7,8,9,10,11 and all 12 partial outputs"
+        ),
     )
 
 
