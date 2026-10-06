@@ -11,9 +11,13 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import hashlib
 import json
+import math
+import os
 from pathlib import Path
 import random
+import signal
 import struct
 import subprocess
 import tempfile
@@ -28,6 +32,17 @@ MAGIC = b"QTCE4GPU"
 VERSION = 1
 PIPE_CODE = {"W": 0, "F": 1, "A": 2, "C": 3, "B": 4}
 HEADER = struct.Struct("<8s7I")
+MAX_CANDIDATES = 1_000_000
+MAX_TRACE_LENGTH = 65_535
+MAX_SEEDS = 4_096
+MAX_JOBS = 10_000_000
+MAX_BATCH_BYTES = 1 << 30
+MAX_REPS = 64
+GLOBAL_SEARCH_TIMEOUT_SECONDS = 30 * 60
+COMMAND_TIMEOUT_SECONDS = 15 * 60
+PARITY_TOLERANCE = 1e-12
+PARITY_SCHEMA = "qtc-e-cuda-parity-v1"
+MANIFEST_SCHEMA = "qtc-e-rental-run-v1"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -52,6 +67,14 @@ class Batch:
 
 
 @dataclasses.dataclass(frozen=True)
+class VerifiedParity:
+    artifact_sha256: str
+    binary_sha256: str
+    batch_sha256: str
+    model_sha256: str
+
+
+@dataclasses.dataclass(frozen=True)
 class Profile:
     candidates: int
     seeds: int
@@ -65,6 +88,103 @@ class Profile:
     modeled_speedup_high: float
     modeled_break_even_jobs: int
     note: str
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def authoritative_model_sha256(pilot_root: Path) -> str:
+    """Hash every source that defines the authoritative score contract."""
+    paths = (
+        Path(__file__),
+        Path(__file__).with_name("optimizer_e4.py"),
+        Path(__file__).with_name("fused_reduction.py"),
+        pilot_root / "s10" / "frag" / "sim2.py",
+    )
+    digest = hashlib.sha256()
+    for path in paths:
+        if not path.is_file():
+            raise FileNotFoundError(f"authoritative model source is missing: {path}")
+        data = path.read_bytes()
+        name = path.name.encode("utf-8")
+        digest.update(struct.pack("<I", len(name)))
+        digest.update(name)
+        digest.update(struct.pack("<Q", len(data)))
+        digest.update(data)
+    return digest.hexdigest()
+
+
+def _checked_layout(count: int, length: int, seed_count: int, nwarps: int) -> tuple[int, int, int, int]:
+    if not 1 <= count <= MAX_CANDIDATES:
+        raise ValueError(f"candidate count must be in 1..{MAX_CANDIDATES}")
+    if not 1 <= length <= MAX_TRACE_LENGTH:
+        raise ValueError(f"trace length must be in 1..{MAX_TRACE_LENGTH}")
+    if not 1 <= seed_count <= MAX_SEEDS:
+        raise ValueError(f"seed count must be in 1..{MAX_SEEDS}")
+    if not 1 <= nwarps <= 8:
+        raise ValueError("nwarps must be in 1..8")
+    jobs = count * seed_count
+    if jobs > MAX_JOBS:
+        raise ValueError(f"candidate-seed jobs exceed {MAX_JOBS}")
+    trace_bytes = count * length * 5
+    offset_bytes = seed_count * nwarps * 2
+    result_bytes = jobs * 8
+    total = HEADER.size + trace_bytes + offset_bytes + result_bytes
+    if total > MAX_BATCH_BYTES:
+        raise ValueError(f"batch exceeds {MAX_BATCH_BYTES} bytes")
+    return jobs, trace_bytes, offset_bytes, total
+
+
+def _validate_trace(trace: EncodedTrace, expected_length: int | None = None) -> None:
+    fields = tuple(getattr(trace, field.name) for field in dataclasses.fields(trace))
+    if not fields or not isinstance(fields[0], bytes):
+        raise ValueError("trace fields must be bytes")
+    length = len(fields[0])
+    if expected_length is not None and length != expected_length:
+        raise ValueError("CUDA contract requires equal trace lengths")
+    if any(not isinstance(field, bytes) or len(field) != length for field in fields):
+        raise ValueError("all trace fields must be bytes of the same length")
+    if any(value > 4 for value in trace.pipe):
+        raise ValueError("pipe codes must be in 0..4")
+    if any(value > 15 for value in trace.stall):
+        raise ValueError("stall fields must be in 0..15")
+    if any(value > 0x3F for value in trace.wait):
+        raise ValueError("wait masks must use only barriers 0..5")
+    if any(value not in (0, 1, 2, 3, 4, 5, 7) for value in trace.write_barrier):
+        raise ValueError("write barriers must be 0..5 or 7")
+    if any(value not in (0, 1) for value in trace.bank_conflict):
+        raise ValueError("bank-conflict fields must be boolean")
+
+
+def validate_batch(batch: Batch, expected: Iterable[float] | None = None) -> tuple[float, ...] | None:
+    if not batch.traces:
+        raise ValueError("batch must contain at least one trace")
+    if not 1 <= batch.reps <= MAX_REPS:
+        raise ValueError(f"reps must be in 1..{MAX_REPS}")
+    if batch.seeds != tuple(range(len(batch.seeds))):
+        raise ValueError("binary contract requires contiguous seeds starting at zero")
+    length = batch.traces[0].length
+    _checked_layout(len(batch.traces), length, len(batch.seeds), batch.nwarps)
+    for trace in batch.traces:
+        _validate_trace(trace, length)
+    if expected is None:
+        return None
+    values = tuple(expected)
+    if len(values) != len(batch.traces) * len(batch.seeds):
+        raise ValueError("one expected value is required per candidate and seed")
+    if any(math.isinf(value) for value in values):
+        raise ValueError("infinite expected scores are forbidden")
+    finite = tuple(math.isfinite(value) for value in values)
+    if any(finite) and not all(finite):
+        raise ValueError("expected scores must be either all finite or all NaN")
+    if not any(finite) and any(not math.isnan(value) for value in values):
+        raise ValueError("non-finite production sentinels must be NaN")
+    return values
 
 
 def offsets_for_seed(seed: int, length: int, nwarps: int) -> tuple[int, ...]:
@@ -143,6 +263,7 @@ def score_trace(
 
 
 def score_batch(batch: Batch) -> tuple[float, ...]:
+    validate_batch(batch)
     return tuple(
         score_trace(trace, seed, nwarps=batch.nwarps, reps=batch.reps)
         for trace in batch.traces
@@ -169,14 +290,12 @@ def encode_state(adapter: PilotSearch, state: tuple[int, ...]) -> EncodedTrace:
 
 
 def write_batch(path: Path, batch: Batch, expected: Iterable[float] | None = None) -> None:
-    if not batch.traces:
-        raise ValueError("batch must contain at least one trace")
+    if expected is None:
+        values = score_batch(batch)
+    else:
+        values = tuple(expected)
+        validate_batch(batch, values)
     length = batch.traces[0].length
-    if any(trace.length != length for trace in batch.traces):
-        raise ValueError("CUDA contract requires equal trace lengths")
-    values = tuple(expected) if expected is not None else score_batch(batch)
-    if len(values) != len(batch.traces) * len(batch.seeds):
-        raise ValueError("one expected value is required per candidate and seed")
     with path.open("wb") as output:
         output.write(HEADER.pack(MAGIC, VERSION, len(batch.traces), length, len(batch.seeds), batch.nwarps, batch.reps, 5))
         for trace in batch.traces:
@@ -193,29 +312,83 @@ def write_unscored_batch(path: Path, batch: Batch) -> None:
     write_batch(path, batch, (float("nan"),) * jobs)
 
 
-def read_scores(path: Path, jobs: int) -> tuple[float, ...]:
+def read_scores(path: Path, jobs: int, *, require_finite: bool = True) -> tuple[float, ...]:
+    if not 1 <= jobs <= MAX_JOBS:
+        raise ValueError(f"jobs must be in 1..{MAX_JOBS}")
     data = path.read_bytes()
     if len(data) != jobs * 8:
         raise ValueError(f"expected {jobs * 8} result bytes, got {len(data)}")
-    return struct.unpack(f"<{jobs}d", data)
+    values = struct.unpack(f"<{jobs}d", data)
+    if require_finite and any(not math.isfinite(value) for value in values):
+        raise ValueError("CUDA returned a non-finite production score")
+    return values
 
 
 def score_batch_cuda(
     batch: Batch,
     executable: Path,
     *,
-    timeout_seconds: int = 900,
+    deadline: float,
+    archive_dir: Path,
+    label: str,
+    manifest_entries: list[dict[str, object]],
 ) -> tuple[float, ...]:
-    """Run the rental scorer; no CPU scores are computed on this path."""
-    with tempfile.TemporaryDirectory(prefix="qtc-e-gpu-") as directory:
-        root = Path(directory)
-        input_path, output_path = root / "frontier.bin", root / "scores.bin"
-        write_unscored_batch(input_path, batch)
-        run_with_watchdog(
-            (str(executable), str(input_path), str(output_path)),
-            timeout_seconds=timeout_seconds,
-        )
-        return read_scores(output_path, len(batch.traces) * len(batch.seeds))
+    """Run one archived production batch under the whole-search deadline."""
+    validate_batch(batch)
+    index = len(manifest_entries)
+    input_path = archive_dir / f"{index:03d}-{label}.batch.bin"
+    output_path = archive_dir / f"{index:03d}-{label}.scores.bin"
+    write_unscored_batch(input_path, batch)
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("whole hybrid search exceeded 1800s")
+    run_with_watchdog(
+        (str(executable), str(input_path), str(output_path)),
+        timeout_seconds=min(COMMAND_TIMEOUT_SECONDS, remaining),
+    )
+    jobs = len(batch.traces) * len(batch.seeds)
+    values = read_scores(output_path, jobs)
+    entry = {
+        "label": label,
+        "batch": input_path.name,
+        "batch_sha256": sha256_file(input_path),
+        "results": output_path.name,
+        "results_sha256": sha256_file(output_path),
+        "candidates": len(batch.traces),
+        "seeds": len(batch.seeds),
+        "nwarps": batch.nwarps,
+        "reps": batch.reps,
+        "jobs": jobs,
+    }
+    manifest_entries.append(entry)
+    print(json.dumps({"event": "progress", **entry}), flush=True)
+    return values
+
+
+def _terminate_process_group(process: subprocess.Popen[bytes] | subprocess.Popen[str]) -> None:
+    parent_running = process.poll() is None
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    if parent_running:
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass
+    group_deadline = time.monotonic() + 2
+    while time.monotonic() < group_deadline:
+        try:
+            os.killpg(process.pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.02)
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    if process.poll() is None:
+        process.wait()
 
 
 def run_with_watchdog(
@@ -225,111 +398,40 @@ def run_with_watchdog(
     watchdog_seconds: int = 15,
 ) -> None:
     """Run a rental command with visible 15-second liveness heartbeats."""
-    process = subprocess.Popen(command)
+    if timeout_seconds <= 0 or watchdog_seconds <= 0:
+        raise ValueError("timeouts must be positive")
+    process = subprocess.Popen(command, start_new_session=True)
     started = time.monotonic()
-    while True:
-        remaining = timeout_seconds - (time.monotonic() - started)
-        if remaining <= 0:
-            process.kill()
-            process.wait()
-            raise TimeoutError(f"rental command exceeded {timeout_seconds}s")
-        try:
-            code = process.wait(timeout=min(watchdog_seconds, remaining))
-        except subprocess.TimeoutExpired:
-            print(json.dumps({"event": "watchdog", "elapsed_seconds": round(time.monotonic() - started, 1)}), flush=True)
-            continue
-        if code:
-            raise subprocess.CalledProcessError(code, command)
-        return
-
-
-def hybrid_search(
-    pilot_root: Path,
-    config: BeamConfig,
-    *,
-    gpu_binary: Path | None,
-) -> dict[str, object]:
-    """End-to-end batched beam; GPU is optional only for local smoke."""
-    adapter = PilotSearch(pilot_root, config)
-    seen = {adapter.initial}
-    parents: dict[tuple[int, ...], BeamObservation[tuple[int, ...]]] = {}
-    edges = 0
-
-    def score_states(states: tuple[tuple[int, ...], ...], seeds: int) -> tuple[float, ...]:
-        batch = Batch(tuple(encode_state(adapter, state) for state in states), tuple(range(seeds)))
-        values = score_batch_cuda(batch, gpu_binary) if gpu_binary else score_batch(batch)
-        return tuple(
-            sum(values[index * seeds : (index + 1) * seeds]) / seeds
-            for index in range(len(states))
-        )
-
-    (initial_score,) = score_states((adapter.initial,), config.coarse_seeds)
-    initial = BeamObservation(adapter.initial, initial_score, 0, None, None)
-    parents[adapter.initial] = initial
-    observations = [initial]
-    frontier = [initial]
-    for depth in range(1, config.depth + 1):
-        pending: list[tuple[tuple[int, ...], tuple[int, ...], tuple[int, int]]] = []
-        for parent in frontier:
-            for state, move in adapter.neighbors(parent.state):
-                edges += 1
-                if state in seen:
-                    continue
-                seen.add(state)
-                pending.append((state, parent.state, move))
-        if not pending:
-            break
-        states = tuple(item[0] for item in pending)
-        scores = score_states(states, config.coarse_seeds)
-        level = []
-        for (state, parent, move), score in zip(pending, scores):
-            observation = BeamObservation(state, score, depth, parent, move)
-            parents[state] = observation
-            observations.append(observation)
-            level.append(observation)
-        frontier = sorted(level, key=lambda item: (item.score, item.state))[: config.width]
-
-    leaders = tuple(sorted(observations, key=lambda item: (item.score, item.depth))[: config.width])
-    confirmed = score_states(tuple(item.state for item in leaders), config.confirmation_seeds)
-    best_index = min(range(len(leaders)), key=lambda index: confirmed[index])
-    best, best_raw = leaders[best_index], confirmed[best_index]
-    (baseline_raw,) = score_states((adapter.identity,), config.confirmation_seeds)
-    normalized = 1238.8756527329024 + best_raw - baseline_raw
-    candidate = fused.project(
-        fused_full_outputs=9,
-        fused_partial_outputs=12,
-        full_cycles=normalized,
-        partial_cycles=363.74544839988715,
-        registers=64,
-        predicates=6,
-        scoreboards=6,
-        spills=0,
-        name="E-rental-hybrid",
-    )
-    return {
-        "method": "CPU dependency/branch/recolor/prune + batched candidate-seed scorer",
-        "scorer": "cuda" if gpu_binary else "cpu-smoke",
-        "depth": config.depth,
-        "width": config.width,
-        "branch_budget": config.branch_budget,
-        "edges": edges,
-        "unique_states": len(observations),
-        "confirmed_candidates": len(leaders),
-        "confirmation_seeds": config.confirmation_seeds,
-        "baseline_raw_cycles": baseline_raw,
-        "best_raw_cycles": best_raw,
-        "best_normalized_cycles": normalized,
-        "best_lcb95": candidate.lcb95_ed,
-        "reaches_lcb_1_04": candidate.lcb95_ed >= 1.04,
-        "best_moves": _provenance(best, parents),
-    }
+    try:
+        while True:
+            remaining = timeout_seconds - (time.monotonic() - started)
+            if remaining <= 0:
+                raise TimeoutError(f"rental command exceeded {timeout_seconds}s")
+            try:
+                code = process.wait(timeout=min(watchdog_seconds, remaining))
+            except subprocess.TimeoutExpired:
+                print(json.dumps({"event": "watchdog", "elapsed_seconds": round(time.monotonic() - started, 1)}), flush=True)
+                continue
+            if code:
+                raise subprocess.CalledProcessError(code, command)
+            return
+    finally:
+        _terminate_process_group(process)
 
 
 def read_batch(path: Path) -> tuple[Batch, tuple[float, ...]]:
-    data = memoryview(path.read_bytes())
+    raw = path.read_bytes()
+    if len(raw) < HEADER.size:
+        raise ValueError("truncated QTC E GPU batch header")
+    data = memoryview(raw)
     magic, version, count, length, seed_count, nwarps, reps, fields = HEADER.unpack_from(data)
     if magic != MAGIC or version != VERSION or fields != 5:
         raise ValueError("unsupported QTC E GPU batch")
+    if not 1 <= reps <= MAX_REPS:
+        raise ValueError(f"reps must be in 1..{MAX_REPS}")
+    jobs, _trace_bytes, offset_bytes, total = _checked_layout(count, length, seed_count, nwarps)
+    if len(data) != total:
+        raise ValueError(f"batch size must be exactly {total} bytes, got {len(data)}")
     position = HEADER.size
     traces = []
     for _ in range(count):
@@ -338,11 +440,302 @@ def read_batch(path: Path) -> tuple[Batch, tuple[float, ...]]:
             arrays.append(bytes(data[position : position + length]))
             position += length
         traces.append(EncodedTrace(*arrays))
-    # Offsets are derived from seeds in the in-memory contract.  The binary
-    # stores the exact offsets instead, so seed identifiers are informational.
-    position += seed_count * nwarps * 2
-    values = struct.unpack_from(f"<{count * seed_count}d", data, position)
-    return Batch(tuple(traces), tuple(range(seed_count)), nwarps, reps), values
+    stored_offsets = struct.unpack_from(f"<{seed_count * nwarps}H", data, position)
+    if any(offset >= length for offset in stored_offsets):
+        raise ValueError("stored warp offset is outside the trace")
+    derived_offsets = tuple(
+        offset
+        for seed in range(seed_count)
+        for offset in offsets_for_seed(seed, length, nwarps)
+    )
+    if stored_offsets != derived_offsets:
+        raise ValueError("stored warp offsets do not match the authoritative seed contract")
+    position += offset_bytes
+    values = struct.unpack_from(f"<{jobs}d", data, position)
+    batch = Batch(tuple(traces), tuple(range(seed_count)), nwarps, reps)
+    validate_batch(batch, values)
+    return batch, values
+
+
+def _write_json(path: Path, value: dict[str, object]) -> None:
+    payload = json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + "\n"
+    path.write_text(payload, encoding="utf-8")
+
+
+def create_parity_artifact(
+    artifact_path: Path,
+    *,
+    executable: Path,
+    batch_path: Path,
+    pilot_root: Path,
+    jobs: int,
+    max_abs_difference: float,
+) -> VerifiedParity:
+    if type(jobs) is not int or jobs < 1:
+        raise ValueError("parity jobs must be a positive integer")
+    if not math.isfinite(max_abs_difference) or not 0 <= max_abs_difference <= PARITY_TOLERANCE:
+        raise ValueError("cannot attest failed or non-finite CUDA parity")
+    payload: dict[str, object] = {
+        "schema": PARITY_SCHEMA,
+        "created_unix": int(time.time()),
+        "gpu_binary_sha256": sha256_file(executable),
+        "authoritative_batch_sha256": sha256_file(batch_path),
+        "authoritative_model_sha256": authoritative_model_sha256(pilot_root),
+        "jobs": jobs,
+        "max_abs_difference": max_abs_difference,
+        "tolerance": PARITY_TOLERANCE,
+    }
+    _write_json(artifact_path, payload)
+    return VerifiedParity(
+        artifact_sha256=sha256_file(artifact_path),
+        binary_sha256=str(payload["gpu_binary_sha256"]),
+        batch_sha256=str(payload["authoritative_batch_sha256"]),
+        model_sha256=str(payload["authoritative_model_sha256"]),
+    )
+
+
+def verify_parity_artifact(
+    artifact_path: Path,
+    *,
+    executable: Path,
+    batch_path: Path,
+    pilot_root: Path,
+) -> VerifiedParity:
+    try:
+        payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"cannot read parity artifact: {error}") from error
+    required = {
+        "schema",
+        "gpu_binary_sha256",
+        "authoritative_batch_sha256",
+        "authoritative_model_sha256",
+        "jobs",
+        "max_abs_difference",
+        "tolerance",
+    }
+    if not isinstance(payload, dict) or not required <= payload.keys() or payload.get("schema") != PARITY_SCHEMA:
+        raise ValueError("unsupported or incomplete parity artifact")
+    maximum = payload["max_abs_difference"]
+    tolerance = payload["tolerance"]
+    if type(maximum) not in (int, float) or not math.isfinite(maximum) or maximum < 0:
+        raise ValueError("parity artifact has an invalid result")
+    if type(tolerance) not in (int, float) or tolerance != PARITY_TOLERANCE or maximum > PARITY_TOLERANCE:
+        raise ValueError("parity artifact did not pass the frozen tolerance")
+    actual = {
+        "gpu_binary_sha256": sha256_file(executable),
+        "authoritative_batch_sha256": sha256_file(batch_path),
+        "authoritative_model_sha256": authoritative_model_sha256(pilot_root),
+    }
+    for field, digest in actual.items():
+        recorded = payload.get(field)
+        if not isinstance(recorded, str) or len(recorded) != 64 or recorded != digest:
+            raise ValueError(f"parity artifact {field} does not match")
+    batch, expected = read_batch(batch_path)
+    if not expected or any(not math.isfinite(value) for value in expected):
+        raise ValueError("parity artifact must bind a fully scored authoritative batch")
+    if type(payload["jobs"]) is not int or payload["jobs"] != len(batch.traces) * len(batch.seeds):
+        raise ValueError("parity artifact job count does not match its batch")
+    return VerifiedParity(
+        artifact_sha256=sha256_file(artifact_path),
+        binary_sha256=actual["gpu_binary_sha256"],
+        batch_sha256=actual["authoritative_batch_sha256"],
+        model_sha256=actual["authoritative_model_sha256"],
+    )
+
+
+def gpu_check(
+    batch_path: Path,
+    executable: Path,
+    artifact_path: Path,
+    pilot_root: Path,
+) -> VerifiedParity:
+    batch, expected = read_batch(batch_path)
+    if any(not math.isfinite(value) for value in expected):
+        raise ValueError("CUDA parity requires finite authoritative references")
+    with tempfile.TemporaryDirectory(prefix="qtc-e-parity-") as directory:
+        output = Path(directory) / "scores.bin"
+        run_with_watchdog(
+            (str(executable), str(batch_path), str(output)),
+            timeout_seconds=COMMAND_TIMEOUT_SECONDS,
+        )
+        actual = read_scores(output, len(expected))
+    maximum = max(abs(left - right) for left, right in zip(actual, expected))
+    if not math.isfinite(maximum) or maximum > PARITY_TOLERANCE:
+        raise ValueError(f"CUDA parity failed: max_abs_difference={maximum!r}")
+    return create_parity_artifact(
+        artifact_path,
+        executable=executable,
+        batch_path=batch_path,
+        pilot_root=pilot_root,
+        jobs=len(expected),
+        max_abs_difference=maximum,
+    )
+
+
+def _write_run_manifest(
+    path: Path,
+    *,
+    status: str,
+    verified: VerifiedParity,
+    executable: Path,
+    entries: list[dict[str, object]],
+    started_unix: int,
+    error: str | None = None,
+) -> str:
+    manifest: dict[str, object] = {
+        "schema": MANIFEST_SCHEMA,
+        "status": status,
+        "started_unix": started_unix,
+        "finished_unix": int(time.time()),
+        "gpu_binary": str(executable),
+        "gpu_binary_sha256": verified.binary_sha256,
+        "parity_artifact_sha256": verified.artifact_sha256,
+        "authoritative_batch_sha256": verified.batch_sha256,
+        "authoritative_model_sha256": verified.model_sha256,
+        "batches": entries,
+    }
+    if error is not None:
+        manifest["error"] = error
+    _write_json(path, manifest)
+    return sha256_file(path)
+
+
+def hybrid_search(
+    pilot_root: Path,
+    config: BeamConfig,
+    *,
+    gpu_binary: Path,
+    parity_artifact: Path,
+    parity_batch: Path,
+    archive_dir: Path,
+    timeout_seconds: int = GLOBAL_SEARCH_TIMEOUT_SECONDS,
+) -> dict[str, object]:
+    """End-to-end CUDA beam, fail-closed behind exact parity and archive bindings."""
+    if not 1 <= timeout_seconds <= GLOBAL_SEARCH_TIMEOUT_SECONDS:
+        raise ValueError("whole-search timeout must be in 1..1800 seconds")
+    verified = verify_parity_artifact(
+        parity_artifact,
+        executable=gpu_binary,
+        batch_path=parity_batch,
+        pilot_root=pilot_root,
+    )
+    archive_dir.mkdir(parents=True, exist_ok=False)
+    entries: list[dict[str, object]] = []
+    manifest_path = archive_dir / "manifest.json"
+    started_unix = int(time.time())
+    deadline = time.monotonic() + timeout_seconds
+    try:
+        adapter = PilotSearch(pilot_root, config)
+        seen = {adapter.initial}
+        parents: dict[tuple[int, ...], BeamObservation[tuple[int, ...]]] = {}
+        edges = 0
+
+        def score_states(
+            states: tuple[tuple[int, ...], ...],
+            seeds: int,
+            reps: int,
+            label: str,
+        ) -> tuple[float, ...]:
+            if time.monotonic() >= deadline:
+                raise TimeoutError("whole hybrid search exceeded 1800s")
+            batch = Batch(tuple(encode_state(adapter, state) for state in states), tuple(range(seeds)), reps=reps)
+            values = score_batch_cuda(
+                batch,
+                gpu_binary,
+                deadline=deadline,
+                archive_dir=archive_dir,
+                label=label,
+                manifest_entries=entries,
+            )
+            return tuple(
+                sum(values[index * seeds : (index + 1) * seeds]) / seeds
+                for index in range(len(states))
+            )
+
+        (initial_score,) = score_states((adapter.initial,), config.coarse_seeds, 3, "coarse-initial")
+        initial = BeamObservation(adapter.initial, initial_score, 0, None, None)
+        parents[adapter.initial] = initial
+        observations = [initial]
+        frontier = [initial]
+        for depth in range(1, config.depth + 1):
+            if time.monotonic() >= deadline:
+                raise TimeoutError("whole hybrid search exceeded 1800s")
+            pending: list[tuple[tuple[int, ...], tuple[int, ...], tuple[int, int]]] = []
+            for parent in frontier:
+                for state, move in adapter.neighbors(parent.state):
+                    edges += 1
+                    if state in seen:
+                        continue
+                    seen.add(state)
+                    pending.append((state, parent.state, move))
+            if not pending:
+                break
+            states = tuple(item[0] for item in pending)
+            scores = score_states(states, config.coarse_seeds, 3, f"coarse-depth-{depth}")
+            level = []
+            for (state, parent, move), score in zip(pending, scores):
+                observation = BeamObservation(state, score, depth, parent, move)
+                parents[state] = observation
+                observations.append(observation)
+                level.append(observation)
+            frontier = sorted(level, key=lambda item: (item.score, item.state))[: config.width]
+
+        leaders = tuple(sorted(observations, key=lambda item: (item.score, item.depth))[: config.width])
+        confirmed = score_states(tuple(item.state for item in leaders), config.confirmation_seeds, 6, "confirmation")
+        best_index = min(range(len(leaders)), key=lambda index: confirmed[index])
+        best, best_raw = leaders[best_index], confirmed[best_index]
+        (baseline_raw,) = score_states((adapter.identity,), config.confirmation_seeds, 6, "confirmation-baseline")
+        normalized = 1238.8756527329024 + best_raw - baseline_raw
+        candidate = fused.project(
+            fused_full_outputs=9,
+            fused_partial_outputs=12,
+            full_cycles=normalized,
+            partial_cycles=363.74544839988715,
+            registers=64,
+            predicates=6,
+            scoreboards=6,
+            spills=0,
+            name="E-rental-hybrid",
+        )
+        manifest_sha256 = _write_run_manifest(
+            manifest_path,
+            status="complete",
+            verified=verified,
+            executable=gpu_binary,
+            entries=entries,
+            started_unix=started_unix,
+        )
+        return {
+            "method": "CPU dependency/branch/recolor/prune + parity-bound CUDA candidate-seed scorer",
+            "scorer": "cuda",
+            "depth": config.depth,
+            "width": config.width,
+            "branch_budget": config.branch_budget,
+            "edges": edges,
+            "unique_states": len(observations),
+            "confirmed_candidates": len(leaders),
+            "confirmation_seeds": config.confirmation_seeds,
+            "baseline_raw_cycles": baseline_raw,
+            "best_raw_cycles": best_raw,
+            "best_normalized_cycles": normalized,
+            "best_lcb95": candidate.lcb95_ed,
+            "reaches_lcb_1_04": candidate.lcb95_ed >= 1.04,
+            "best_moves": _provenance(best, parents),
+            "archive_manifest": str(manifest_path),
+            "archive_manifest_sha256": manifest_sha256,
+        }
+    except BaseException as error:
+        _write_run_manifest(
+            manifest_path,
+            status="failed",
+            verified=verified,
+            executable=gpu_binary,
+            entries=entries,
+            started_unix=started_unix,
+            error=f"{type(error).__name__}: {error}",
+        )
+        raise
 
 
 def profile(pilot_root: Path, candidates: int = 8, seeds: int = 8) -> Profile:
@@ -386,13 +779,46 @@ def profile(pilot_root: Path, candidates: int = 8, seeds: int = 8) -> Profile:
     )
 
 
-def export_frontier(pilot_root: Path, output: Path, candidates: int, seeds: int) -> None:
+def authoritative_scores(
+    adapter: PilotSearch,
+    states: tuple[tuple[int, ...], ...],
+    seeds: int,
+    *,
+    reps: int,
+) -> tuple[float, ...]:
+    values = []
+    for state in states:
+        lines, labels, _order, _main, _banks = adapter._lines(state)
+        program = [adapter.isa.parse(line) for line in lines]
+        sequence = adapter.sim2.trace_of(program, labels)
+        values.extend(
+            adapter.sim2.simulate(program, sequence, seed=seed, reps=reps)
+            for seed in range(seeds)
+        )
+    if any(not math.isfinite(value) for value in values):
+        raise ValueError("authoritative sim2 returned a non-finite score")
+    return tuple(values)
+
+
+def export_frontier(
+    pilot_root: Path,
+    output: Path,
+    candidates: int,
+    seeds: int,
+    *,
+    reps: int = 6,
+    unscored: bool = False,
+) -> None:
     adapter = PilotSearch(pilot_root, BeamConfig(branch_budget=max(candidates - 1, 1)))
     states = [adapter.identity]
     states.extend(state for state, _move in adapter.neighbors(adapter.identity))
-    traces = tuple(encode_state(adapter, state) for state in states[:candidates])
-    batch = Batch(traces, tuple(range(seeds)))
-    write_batch(output, batch)
+    chosen = tuple(states[:candidates])
+    traces = tuple(encode_state(adapter, state) for state in chosen)
+    batch = Batch(traces, tuple(range(seeds)), reps=reps)
+    if unscored:
+        write_unscored_batch(output, batch)
+    else:
+        write_batch(output, batch, authoritative_scores(adapter, chosen, seeds, reps=reps))
 
 
 def main() -> None:
@@ -403,37 +829,53 @@ def main() -> None:
     parser.add_argument("--candidates", type=int, default=8)
     parser.add_argument("--seeds", type=int, default=8)
     parser.add_argument("--gpu-binary", type=Path)
+    parser.add_argument("--parity-artifact", type=Path)
+    parser.add_argument("--parity-batch", type=Path)
+    parser.add_argument("--archive-dir", type=Path)
+    parser.add_argument("--result", type=Path)
     parser.add_argument("--unscored", action="store_true")
+    parser.add_argument("--reps", type=int, default=6)
     parser.add_argument("--depth", type=int, default=4)
     parser.add_argument("--width", type=int, default=8)
     parser.add_argument("--branch-budget", type=int, default=48)
+    parser.add_argument("--timeout-seconds", type=int, default=GLOBAL_SEARCH_TIMEOUT_SECONDS)
     args = parser.parse_args()
-    if args.command in {"profile", "export", "hybrid-search"} and args.pilot_root is None:
-        parser.error("profile/export/hybrid-search require --pilot-root")
+    if args.command in {"profile", "export", "gpu-check", "hybrid-search"} and args.pilot_root is None:
+        parser.error("profile/export/gpu-check/hybrid-search require --pilot-root")
     if args.command in {"export", "check", "gpu-check"} and args.batch is None:
         parser.error("export/check/gpu-check require --batch")
     if args.command in {"gpu-check", "hybrid-search"} and args.gpu_binary is None:
         parser.error("gpu-check/hybrid-search requires --gpu-binary")
+    if args.command == "gpu-check" and args.parity_artifact is None:
+        parser.error("gpu-check requires --parity-artifact")
+    if args.command == "hybrid-search" and any(
+        value is None for value in (args.parity_artifact, args.parity_batch, args.archive_dir)
+    ):
+        parser.error("hybrid-search requires --parity-artifact, --parity-batch and --archive-dir")
     if args.command == "profile":
         print(json.dumps(dataclasses.asdict(profile(args.pilot_root, args.candidates, args.seeds)), indent=2))
     elif args.command == "export":
-        if args.unscored:
-            adapter = PilotSearch(args.pilot_root, BeamConfig(branch_budget=max(args.candidates - 1, 1)))
-            states = [adapter.identity]
-            states.extend(state for state, _move in adapter.neighbors(adapter.identity))
-            traces = tuple(encode_state(adapter, state) for state in states[: args.candidates])
-            write_unscored_batch(args.batch, Batch(traces, tuple(range(args.seeds))))
-        else:
-            export_frontier(args.pilot_root, args.batch, args.candidates, args.seeds)
+        export_frontier(
+            args.pilot_root,
+            args.batch,
+            args.candidates,
+            args.seeds,
+            reps=args.reps,
+            unscored=args.unscored,
+        )
     elif args.command == "check":
         batch, expected = read_batch(args.batch)
         actual = score_batch(batch)
+        if any(not math.isfinite(value) for value in expected):
+            raise ValueError("check requires a fully scored authoritative batch")
         maximum = max(abs(left - right) for left, right in zip(actual, expected))
-        print(json.dumps({"jobs": len(actual), "max_abs_difference": maximum, "passes": maximum <= 1e-12}))
-        if maximum > 1e-12:
+        passes = math.isfinite(maximum) and maximum <= PARITY_TOLERANCE
+        print(json.dumps({"jobs": len(actual), "max_abs_difference": maximum, "passes": passes}))
+        if not passes:
             raise SystemExit(1)
     elif args.command == "gpu-check":
-        run_with_watchdog((str(args.gpu_binary), str(args.batch)), timeout_seconds=900)
+        verified = gpu_check(args.batch, args.gpu_binary, args.parity_artifact, args.pilot_root)
+        print(json.dumps({"parity": "PASS", **dataclasses.asdict(verified)}, indent=2))
     else:
         config = BeamConfig(
             depth=args.depth,
@@ -442,7 +884,18 @@ def main() -> None:
             coarse_seeds=args.seeds,
             confirmation_seeds=64,
         )
-        print(json.dumps(hybrid_search(args.pilot_root, config, gpu_binary=args.gpu_binary), indent=2))
+        result = hybrid_search(
+            args.pilot_root,
+            config,
+            gpu_binary=args.gpu_binary,
+            parity_artifact=args.parity_artifact,
+            parity_batch=args.parity_batch,
+            archive_dir=args.archive_dir,
+            timeout_seconds=args.timeout_seconds,
+        )
+        if args.result is not None:
+            _write_json(args.result, result)
+        print(json.dumps(result, indent=2))
 
 
 if __name__ == "__main__":

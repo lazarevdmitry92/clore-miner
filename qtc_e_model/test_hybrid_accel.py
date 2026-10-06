@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
+import struct
+import subprocess
+import sys
+
+import pytest
 
 from miner.qtc_e_model import hybrid_accel as hybrid
+from miner.qtc_e_model.optimizer_e4 import BeamConfig, PilotSearch
 
 
 def _trace() -> hybrid.EncodedTrace:
@@ -41,3 +48,159 @@ def test_unscored_batch_contains_no_accidental_cpu_claim(tmp_path: Path):
 
 def test_offsets_match_python_random_contract():
     assert hybrid.offsets_for_seed(0, 10, 4) == (6, 6, 0, 4)
+
+
+def test_read_batch_rejects_wrong_size_offsets_domains_and_nonfinite_values(tmp_path: Path):
+    batch = hybrid.Batch((_trace(),), (0,), nwarps=2, reps=3)
+    good = tmp_path / "good.bin"
+    hybrid.write_batch(good, batch)
+    payload = good.read_bytes()
+
+    trailing = tmp_path / "trailing.bin"
+    trailing.write_bytes(payload + b"x")
+    with pytest.raises(ValueError, match="exactly"):
+        hybrid.read_batch(trailing)
+
+    bad_pipe = tmp_path / "pipe.bin"
+    changed = bytearray(payload)
+    changed[hybrid.HEADER.size] = 5
+    bad_pipe.write_bytes(changed)
+    with pytest.raises(ValueError, match="pipe"):
+        hybrid.read_batch(bad_pipe)
+
+    bad_offset = tmp_path / "offset.bin"
+    changed = bytearray(payload)
+    offset_position = hybrid.HEADER.size + 5 * _trace().length
+    original_offset = struct.unpack_from("<H", changed, offset_position)[0]
+    struct.pack_into("<H", changed, offset_position, (original_offset + 1) % _trace().length)
+    bad_offset.write_bytes(changed)
+    with pytest.raises(ValueError, match="authoritative seed"):
+        hybrid.read_batch(bad_offset)
+
+    infinite = tmp_path / "infinite.bin"
+    changed = bytearray(payload)
+    struct.pack_into("<d", changed, len(changed) - 8, math.inf)
+    infinite.write_bytes(changed)
+    with pytest.raises(ValueError, match="infinite"):
+        hybrid.read_batch(infinite)
+
+
+@pytest.mark.parametrize(("header_index", "value", "message"), (
+    (2, 0, "candidate"),
+    (3, 0, "trace length"),
+    (4, 0, "seed count"),
+    (5, 0, "nwarps"),
+    (5, 9, "nwarps"),
+    (6, 0, "reps"),
+))
+def test_read_batch_rejects_unsafe_dimensions(
+    tmp_path: Path,
+    header_index: int,
+    value: int,
+    message: str,
+):
+    path = tmp_path / f"bad-{header_index}-{value}.bin"
+    batch = hybrid.Batch((_trace(),), (0,), nwarps=2, reps=3)
+    hybrid.write_batch(path, batch)
+    changed = bytearray(path.read_bytes())
+    header = list(hybrid.HEADER.unpack_from(changed))
+    header[header_index] = value
+    hybrid.HEADER.pack_into(changed, 0, *header)
+    path.write_bytes(changed)
+    with pytest.raises(ValueError, match=message):
+        hybrid.read_batch(path)
+
+
+def test_read_scores_rejects_nonfinite_cuda_output(tmp_path: Path):
+    output = tmp_path / "scores.bin"
+    output.write_bytes(struct.pack("<d", math.nan))
+    with pytest.raises(ValueError, match="non-finite"):
+        hybrid.read_scores(output, 1)
+
+
+def _model_root(tmp_path: Path) -> Path:
+    root = tmp_path / "pilot"
+    source = root / "s10" / "frag" / "sim2.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("# authoritative test model\n", encoding="utf-8")
+    return root
+
+
+def test_parity_artifact_binds_exact_binary_batch_and_model(tmp_path: Path):
+    binary = tmp_path / "scorer"
+    binary.write_bytes(b"binary-v1")
+    batch_path = tmp_path / "parity.bin"
+    batch = hybrid.Batch((_trace(),), (0,), nwarps=2, reps=6)
+    hybrid.write_batch(batch_path, batch)
+    pilot_root = _model_root(tmp_path)
+    artifact = tmp_path / "parity.json"
+    hybrid.create_parity_artifact(
+        artifact,
+        executable=binary,
+        batch_path=batch_path,
+        pilot_root=pilot_root,
+        jobs=1,
+        max_abs_difference=0.0,
+    )
+    hybrid.verify_parity_artifact(
+        artifact,
+        executable=binary,
+        batch_path=batch_path,
+        pilot_root=pilot_root,
+    )
+
+    binary.write_bytes(b"binary-v2")
+    with pytest.raises(ValueError, match="gpu_binary_sha256"):
+        hybrid.verify_parity_artifact(
+            artifact,
+            executable=binary,
+            batch_path=batch_path,
+            pilot_root=pilot_root,
+        )
+
+
+def test_watchdog_times_out_and_reaps_process_group():
+    with pytest.raises(TimeoutError):
+        hybrid.run_with_watchdog(
+            (sys.executable, "-c", "import time; time.sleep(10)"),
+            timeout_seconds=0.05,
+            watchdog_seconds=0.01,
+        )
+
+
+def _authoritative_pilot_root() -> Path | None:
+    repo = Path(__file__).resolve().parents[2]
+    candidates = [repo / "pilots" / "miner" / "qtc_own_miner"]
+    marker = repo / ".git"
+    if marker.is_file():
+        gitdir = Path(marker.read_text(encoding="utf-8").strip().split(":", 1)[1].strip())
+        commondir = (gitdir / (gitdir / "commondir").read_text(encoding="utf-8").strip()).resolve()
+        candidates.append(commondir.parent / "pilots" / "miner" / "qtc_own_miner")
+    return next((candidate for candidate in candidates if (candidate / "s10" / "frag" / "sim2.py").is_file()), None)
+
+
+def test_encoded_real_trace_matches_authoritative_sim2_for_coarse_and_confirmation_reps():
+    pilot_root = _authoritative_pilot_root()
+    if pilot_root is None:
+        pytest.skip("ignored authoritative S10 pilot is not installed")
+    adapter = PilotSearch(pilot_root, BeamConfig())
+    lines, labels, _order, _main, _banks = adapter._lines(adapter.identity)
+    program = [adapter.isa.parse(line) for line in lines]
+    sequence = adapter.sim2.trace_of(program, labels)
+    trace = hybrid.encode_lines(adapter, lines, labels)
+    for reps in (3, 6):
+        for seed in (0, 1):
+            authoritative = adapter.sim2.simulate(program, sequence, seed=seed, reps=reps)
+            encoded = hybrid.score_trace(trace, seed, nwarps=8, reps=reps)
+            assert encoded == pytest.approx(authoritative, abs=1e-12)
+
+
+def test_rental_entrypoint_is_syntax_checked_and_done_is_after_manifest_gate():
+    root = Path(__file__).parent
+    entrypoint = root / "rental_entrypoint.sh"
+    subprocess.run(("bash", "-n", str(entrypoint)), check=True)
+    source = entrypoint.read_text(encoding="utf-8")
+    assert "platforms.clore" not in source and "platforms.vast" not in source
+    assert source.index('manifest.get("status") != "complete"') < source.index('mv "$DONE.tmp" "$DONE"')
+    dockerfile = (root / "rental_image.Dockerfile").read_text(encoding="utf-8")
+    assert dockerfile.startswith("FROM nvidia/cuda:12.6.3-devel-ubuntu24.04\n")
