@@ -20,8 +20,8 @@ from collections.abc import Callable, Iterable, Mapping
 from .fused_reduction import Anchor, ResidualV2, Z95, build_report, project
 
 
-FULL_MASK = 0b111111110001  # outputs 0,4,5,6,7,8,9,10,11
-FULL_INDICES = (0, 4, 5, 6, 7, 8, 9, 10, 11)
+FULL_MASK = 2941
+FULL_INDICES = (0, 2, 3, 4, 5, 6, 8, 9, 11)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -170,8 +170,8 @@ def _point(name: str, full_cycles: float, partial_cycles: float, full_fusions: i
 
 def gap_ladder(anchor: Anchor = Anchor()) -> tuple[LadderPoint, ...]:
     return (
-        _point("best-feasible", 1248.6289419421269, 363.74544839988715, 9),
-        _point("partial-resource-floor", 1248.6289419421269, 358.4, 9),
+        _point("best-feasible-E3", 1238.8756527329024, 363.74544839988715, 9),
+        _point("partial-resource-floor", 1238.8756527329024, 358.4, 9),
         _point("full-and-partial-resource-floors", 1130 / (120 / 128), 358.4, 9),
         _point("certified-resource-bound", 1130 / (120 / 128), 358.4, 12),
     )
@@ -193,12 +193,12 @@ def lcb_with_sd(corrected_ratio: float, log_sd: float) -> float:
 
 
 LOO_SENSITIVITY = {
-    "without-s10-a": (1.04145779, 1.02909020),
-    "without-s10-abc": (1.04229905, 1.03037014),
-    "without-s14": (1.04300199, 1.03123907),
-    "without-s6-b": (1.04298926, 1.03104673),
-    "without-s6-c1": (1.04342207, 1.03142545),
-    "without-s6-n": (1.04287239, 1.03180684),
+    "without-s10-a": (1.04494933, 1.03240977),
+    "without-s10-abc": (1.04586298, 1.03377689),
+    "without-s14": (1.04662647, 1.03468811),
+    "without-s6-b": (1.04661264, 1.03450400),
+    "without-s6-c1": (1.04708275, 1.03489265),
+    "without-s6-n": (1.04648570, 1.03517663),
 }
 
 
@@ -232,15 +232,15 @@ def build_optimizer_report() -> dict[str, object]:
         "search": {
             "full": dataclasses.asdict(
                 SearchEvidence(
-                    "best-first one-bit acquisition + 64-seed confirmation",
-                    90,
+                    "best-first mask acquisition + bank-aware recolor + one legal neighbor",
+                    95,
                     2**12,
                     False,
                     FULL_MASK,
                     FULL_INDICES,
                     1256.583165159796,
-                    1248.2121071019228,
-                    1248.6289419421269,
+                    1238.4588178926983,
+                    1238.8756527329024,
                 )
             ),
             "partial": {
@@ -268,12 +268,24 @@ def build_optimizer_report() -> dict[str, object]:
         "best_feasible": dataclasses.asdict(report.candidate),
         "gap_ladder": [dataclasses.asdict(point) for point in ladder],
         "best_to_bound_corrected_gap": ladder[-1].corrected_ed / ladder[0].corrected_ed - 1,
+        "current_family_blocker": {
+            "scope": "E3 fixed instruction/control order with register-bank recolor and occupancy only",
+            "required_normalized_full_cycles_for_lcb_1_04": 1222.7854173827698,
+            "feasible_normalized_full_cycles": 1238.8756527329024,
+            "zero_bank_8_warp_normalized_cycles": 1235.9540978673654,
+            "zero_bank_9_warp_normalized_cycles": 1231.939244682243,
+            "zero_bank_10_warp_normalized_cycles": 1228.7413546667158,
+            "zero_bank_10_warp_lcb95": 1.0378816475650245,
+            "reaches_lcb_1_04": False,
+            "note": "does not bound a new instruction order or new arithmetic",
+        },
         "residual_variance": variance,
         "residual_sensitivity": sensitivity,
         "leave_one_group_out": LOO_SENSITIVITY,
         "decision": (
-            "MODEL-GO for the existing gate; central E/D exceeds 1.04, but LCB95 does not. "
-            "The resource bound is global; the finite-budget schedule point is only best observed."
+            "E3 is the best observed model point and remains fallback-only: central exceeds 1.04, "
+            "but LCB95 does not. Even zero bank conflicts plus hypothetical 10-warps/SMSP misses "
+            "LCB95=1.04 for the fixed E3 order; a joint scheduler/allocator or new arithmetic is required."
         ),
     }
 

@@ -12,8 +12,8 @@ existing model gate is central `>=1.015` and one-sided `LCB95>=1.010`; the new
 product goal is an independently confirmed `>=1.04`. QP is outside this
 optimizer: E must first beat D in a randomized paired test.
 
-The best feasible model point, **E2**, is central `1.04266 E/D` and LCB95
-`1.03085`. It passes the existing model gate and clears +4% centrally, but it
+The best feasible model point, **E3**, is central `1.04625 E/D` and LCB95
+`1.03429`. It passes the existing model gate and clears +4% centrally, but it
 does **not** establish +4% with 95% confidence. The decision is therefore
 MODEL-GO for continued offline/SASS validation, not a performance claim and
 not yet authorization for a GPU test.
@@ -33,9 +33,10 @@ consumes no-borrow and `k`. No replacement ALU instruction is introduced.
 The identity requires the reachable bound `r3+k <= 0xffffffff`; the pure
 model rejects the wider wrapping case.
 
-E2 applies this identity to all 12 partial outputs and full-round outputs
-`0,4,5,6,7,8,9,10,11`. The full mask was selected by best-first one-bit
-acquisition, not by permuting the old 60 forms or by a Cartesian grid.
+E3 applies this identity to all 12 partial outputs and full-round outputs
+`0,2,3,4,5,6,8,9,11`, then makes one dependency-safe adjacent schedule move
+and greedily recolors non-pinned live intervals only when bank conflicts fall.
+The mask was selected by best-first acquisition, not a Cartesian grid.
 
 ## D -> E by process and resource
 
@@ -60,7 +61,7 @@ schedule and the certified `358.4` resource floor.
 
 Full round:
 
-| process | D instr | E2 instr | D F/A | E2 F/A |
+| process | D instr | E3 instr | D F/A | E3 F/A |
 |---|---:|---:|---:|---:|
 | 12 x7 S-boxes | 492 | 492 | 984/816 | 984/816 |
 | M4/setup | 90 | 90 | 42/138 | 42/138 |
@@ -69,13 +70,14 @@ Full round:
 | constants + control | 20 | 20 | 0/8 | 0/8 |
 | **total** | **698** | **689** | **1098/1130** | **1080/1130** |
 
-Best-first acquisition evaluated 90 of the 4096 masks; the top candidates
-were rechecked with 64 seeds. Mask `4081` gives raw `1248.212` vs D
-`1256.583`, normalized to `1248.629`. This is the best observed feasible
-schedule, **not** a proof of the globally best schedule.
+Best-first acquisition evaluated 90 masks and the bank-aware stage rechecked
+five leading masks with 64 seeds. Mask `2941`, one legal neighbor and nine
+live-interval recolors reduce bank conflicts `14 -> 4`; raw cycles are
+`1238.459` vs D `1256.583`, normalized to `1238.876`. This is the best
+observed feasible schedule, **not** a proof of the globally best schedule.
 
 Whole-kernel resources remain within 64 registers, 6 predicates, 6
-scoreboards and zero spills. E2 removes 663 instructions per nonce in the
+scoreboards and zero spills. E3 removes 663 instructions per nonce in the
 weighted model and lowers modeled energy from `509.000` to `503.630 nJ`.
 The multiplier is deliberately 15, not 16: the generated L body has 15 common
 full slots while its special `lin8` path remains D.
@@ -84,8 +86,8 @@ full slots while its special `lin8` path remains D.
 
 | point | full cycles | partial cycles | physics E/D | residual-v2 E/D | LCB95 |
 |---|---:|---:|---:|---:|---:|
-| E2 best feasible | 1248.629 | 363.745 | 1.03751 | **1.04266** | **1.03085** |
-| + partial resource floor | 1248.629 | 358.400 | 1.04259 | 1.04845 | 1.03639 |
+| E3 best feasible | 1238.876 | 363.745 | 1.04066 | **1.04625** | **1.03429** |
+| + partial resource floor | 1238.876 | 358.400 | 1.04576 | 1.05209 | 1.03986 |
 | + full resource floor | 1205.333 | 358.400 | 1.05692 | 1.06481 | 1.05191 |
 | + all 12 full fusions | 1205.333 | 358.400 | 1.05713 | **1.06505** | **1.05213** |
 
@@ -96,29 +98,37 @@ without enumerating `2^24` assignments. The `120/128` mixing ceiling supplies
 the cycle floors. Residual-v2 numbers around that bound are forecasts, not
 part of the arithmetic proof.
 
-The remaining corrected gap from E2 to the bound is 2.147%. Most of it is the
-full-round schedule gap (~1.64 percentage points of corrected E/D), then the
-partial schedule gap (~0.58 pp); the last three full fusions contribute only
-~0.024 pp through the energy model. This makes full-round scheduling the next
-model-only target.
+The remaining corrected gap from E3 to the resource bound is 1.796%. E3 still
+does not pass the new `LCB95>=1.04` goal: at the current partial schedule it
+requires normalized full cycles `<=1222.785`.
+
+For the fixed E3 instruction/control order, even optimistic execution does not
+close that gap: deleting every bank penalty gives `1235.954`; hypothetical
+9-warps/SMSP plus zero bank penalties gives `1231.939`; even 10 warps plus
+zero penalties gives `1228.741`, LCB95 `1.03788`. This is a conservative
+blocker for the current recolor/occupancy family only; it does not bound a new
+instruction order or new arithmetic. The next optimizer must jointly choose
+the scheduler and bank-aware allocator. A whole-kernel recolor to declared
+`<=56` registers is the next occupancy gate; until proven, E2 remains fallback
+and E3 is not promoted.
 
 ## Confidence and useful data
 
 Residual v2 is frozen from S15: 18 paired observations in six independent
 groups, coefficient `0.1343555`, covariance `0.00289469`, model log-SD
 `0.00419068`, candidate log-SD `0.0035`. Leave-one-group-out central forecasts
-are `1.04146..1.04342`, with LCB95 `1.02909..1.03181`; every omission retains
+are `1.04495..1.04708`, with LCB95 `1.03241..1.03518`; every omission retains
 the existing GO decision.
 
-Variance shares at E2 are 52.1% historical residual, 36.3% candidate transfer,
-and 11.6% coefficient estimation. The realistic model-only reductions are:
+Variance shares at E3 are 51.0% historical residual, 35.6% candidate transfer,
+and 13.4% coefficient estimation. The realistic model-only reductions are:
 
 | evidence change | projected LCB95 |
 |---|---:|
-| current | 1.03085 |
-| candidate SD 0.0035 -> 0.002 via exact SASS/static evidence | 1.03239 |
-| twice as much independent paired history | 1.03290 |
-| both | 1.03484 |
+| current | 1.03429 |
+| candidate SD 0.0035 -> 0.002 via exact SASS/static evidence | 1.03582 |
+| twice as much independent paired history | 1.03639 |
+| both | 1.03832 |
 
 More D-only telemetry helps normalize clocks, temperature and throttling, but
 cannot identify E/D. The most valuable additional inputs are independent

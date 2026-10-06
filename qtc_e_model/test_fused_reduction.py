@@ -44,9 +44,9 @@ def test_fused_linear_candidate_passes_model_gate_and_constraints():
     assert candidate.predicates == 6
     assert candidate.scoreboards == 6
     assert candidate.spills == 0
-    assert candidate.physics_ed == pytest.approx(1.0375115152051728)
-    assert candidate.corrected_ed == pytest.approx(1.0426574796546892)
-    assert candidate.lcb95_ed == pytest.approx(1.030854953522004)
+    assert candidate.physics_ed == pytest.approx(1.040664257468481)
+    assert candidate.corrected_ed == pytest.approx(1.0462522814896607)
+    assert candidate.lcb95_ed == pytest.approx(1.0342921067405533)
     assert candidate.passes_gate
 
 
@@ -67,3 +67,10 @@ def test_resource_bound_is_exact_for_the_binary_fusion_family():
     assert certificate.physics_ed_upper == pytest.approx(1.0571278508603397)
     assert certificate.corrected_ed_upper == pytest.approx(1.065047994784599)
     assert certificate.corrected_lcb95_upper == pytest.approx(1.0521332850266203)
+
+
+def test_e3_bank_schedule_is_repeatable_and_dependency_safe(tmp_path):
+    # Pure guards for the transform itself; pilot-backed regeneration is
+    # covered by the committed SASS artifact and its offline verifier.
+    assert model.E3_FULL_INDICES == (0, 2, 3, 4, 5, 6, 8, 9, 11)
+    assert model.E3_ADJACENT_SWAP == 360

@@ -29,6 +29,8 @@ M64 = (1 << 64) - 1
 EPS = M32
 MIXING_CEILING = 120.0 / 128.0
 Z95 = 1.959963984540054
+E3_FULL_INDICES = (0, 2, 3, 4, 5, 6, 8, 9, 11)
+E3_ADJACENT_SWAP = 360
 
 
 @dataclasses.dataclass(frozen=True)
@@ -253,7 +255,7 @@ def build_report(anchor: Anchor = Anchor()) -> Report:
     candidate = project(
         fused_full_outputs=9,
         fused_partial_outputs=12,
-        full_cycles=1248.6289419421269,
+        full_cycles=1238.8756527329024,
         partial_cycles=363.74544839988715,
         # Both generated bodies remain within D's existing whole-kernel
         # 64/6/6 ceiling.
@@ -262,7 +264,7 @@ def build_report(anchor: Anchor = Anchor()) -> Report:
         scoreboards=6,
         spills=0,
         anchor=anchor,
-        name="E2-fused-linear",
+        name="E3-bank-aware",
     )
 
     # Every fusion removes one F-pipe IMAD.X and 8.1 pJ while leaving A work
@@ -310,7 +312,10 @@ def build_report(anchor: Anchor = Anchor()) -> Report:
     )
 
 
-def _patch_pilot(pilot_root: Path):
+def _patch_pilot(
+    pilot_root: Path,
+    full_fused_indices: tuple[int, ...] = E3_FULL_INDICES,
+):
     frag = pilot_root / "s10" / "frag"
     if not (frag / "gen.py").is_file():
         raise FileNotFoundError(f"S10 frag tools not found under {pilot_root}")
@@ -318,15 +323,19 @@ def _patch_pilot(pilot_root: Path):
     gen = importlib.import_module("gen")
     partial = importlib.import_module("partial")
 
-    full_fused = frozenset((0, 4, 5, 6, 7, 8, 9, 10, 11))
-    full_index = 0
+    full_fused = frozenset(full_fused_indices)
+    if any(index < 0 or index >= 12 for index in full_fused):
+        raise ValueError("full fusion indices must be in 0..11")
+    full_state = {"index": 0}
     original_out_fold = gen.out_fold
 
     def selective_full_fold(block, y, s, rcp, chain, out0, out1):
-        nonlocal full_index
-        index = full_index
-        full_index += 1
-        if index not in full_fused:
+        # One L generation calls out_fold for 12 common outputs and then 12
+        # special lin8 outputs.  Keep lin8 at D and make repeated offline
+        # optimizer evaluations deterministic in the same interpreter.
+        index = full_state["index"] % 24
+        full_state["index"] += 1
+        if index >= 12 or index not in full_fused:
             return original_out_fold(block, y, s, rcp, chain, out0, out1)
         w = gen.Pair("w")
         lane = gen.add3_ll(block, y, s, (rcp.lo, rcp.hi, None), chain, dst=w)
@@ -403,14 +412,145 @@ def _patch_pilot(pilot_root: Path):
         )
 
     gen.out_fold = selective_full_fold
+    gen.qtc_e_reset_fusion = lambda: full_state.update(index=0)
     partial.fold_out = fused_fold_out
     return gen, partial, importlib.import_module("body_io")
 
 
+def _independent_at_physical_level(left, right) -> bool:
+    def resources(op):
+        reads = {word.phys for _slot, word in op.uses}
+        writes = {word.phys for word in op.defs}
+        preads = {predicate.phys for predicate in op.puses}
+        pwrites = {predicate.phys for predicate in op.pdefs}
+        return reads, writes, preads, pwrites
+
+    lr, lw, lp, lq = resources(left)
+    rr, rw, rp, rq = resources(right)
+    return not (lw & (rr | rw) or rw & (lr | lw) or lq & (rp | rq) or rq & (lp | lq))
+
+
+def _refresh_reuse(gen, order) -> None:
+    """Reproduce ``seal``'s adjacent-source reuse marking without controls."""
+    for op in order:
+        op.reuse = set()
+    sequence = [gen.to_ins(op) for op in order]
+    for index, (first, second) in enumerate(zip(sequence, sequence[1:])):
+        if (
+            first.base not in gen.REUSE_OK
+            or second.base not in gen.REUSE_OK
+            or ".HI" in first.op and first.base == "LEA"
+            or ".HI" in second.op and second.base == "LEA"
+        ):
+            continue
+        sources_first = {slot: operand.n for slot, operand in enumerate(first.src) if operand.kind == "R" and operand.n != 255}
+        sources_second = {slot: operand.n for slot, operand in enumerate(second.src) if operand.kind == "R" and operand.n != 255}
+        writes_first = {register for _kind, register in first.dst_regs()}
+        for slot, register in sources_first.items():
+            if (
+                sources_second.get(slot) == register
+                and register not in writes_first
+                and not (".WIDE" in first.op and slot == 2)
+                and not (".WIDE" in second.op and slot == 2)
+            ):
+                order[index].reuse.add(slot)
+
+
+def _bank_conflicts(order) -> int:
+    conflicts = 0
+    for op in order:
+        registers = {word.phys for slot, word in op.uses if slot not in op.reuse}
+        even = sum(register % 2 == 0 for register in registers)
+        odd = len(registers) - even
+        conflicts += even > 2 or odd > 2
+    return conflicts
+
+
+def apply_e3_bank_schedule(gen, block) -> tuple[tuple[str, int, int], ...]:
+    """Apply the directed E3 neighbor and greedy live-interval recoloring.
+
+    The adjacent move is accepted only when it is dependency-safe even after
+    allocation.  Recoloring changes only unpaired, non-pinned words and uses
+    an opposite-parity register whose live interval is empty.  Every accepted
+    move strictly lowers measured static bank conflicts, so the procedure
+    terminates without a parameter grid.
+    """
+    order = list(block.order)
+    swap = E3_ADJACENT_SWAP
+    if swap + 1 >= len(order) or not _independent_at_physical_level(order[swap], order[swap + 1]):
+        raise RuntimeError("E3 adjacent schedule transform is not dependency-safe")
+    order[swap], order[swap + 1] = order[swap + 1], order[swap]
+
+    words: dict[int, object] = {}
+    first: dict[object, int] = {}
+    last: dict[object, int] = {}
+    for index, op in enumerate(order):
+        for _slot, word in op.uses:
+            words[word.id] = word
+            last[word] = index
+            first.setdefault(word, -1)
+        for word in op.defs:
+            words[word.id] = word
+            first.setdefault(word, index)
+            last[word] = max(last.get(word, index), index)
+    for word in words.values():
+        if word.fixed is not None and first[word] >= 0:
+            last[word] = len(order)
+
+    def available(word, register: int) -> bool:
+        if register not in gen.AVAIL:
+            return False
+        return all(
+            other is word
+            or other.phys != register
+            or last[other] < first[word]
+            or last[word] < first[other]
+            for other in words.values()
+        )
+
+    moves: list[tuple[str, int, int]] = []
+    # Recoloring preserves virtual live intervals, so it cannot create an
+    # adjacent same-register reuse between two distinct live words.  The reuse
+    # topology therefore stays valid while physical parities change.
+    _refresh_reuse(gen, order)
+    while True:
+        incumbent = _bank_conflicts(order)
+        best: tuple[int, object, int, int] | None = None
+        for word in words.values():
+            if word.fixed is not None or word.pair is not None:
+                continue
+            old = word.phys
+            for register in gen.AVAIL:
+                if register % 2 == old % 2 or not available(word, register):
+                    continue
+                word.phys = register
+                conflicts = _bank_conflicts(order)
+                if conflicts < incumbent and (best is None or conflicts < best[0]):
+                    best = (conflicts, word, old, register)
+                word.phys = old
+        if best is None:
+            break
+        _conflicts, word, old, register = best
+        word.phys = register
+        moves.append((word.name, old, register))
+
+    _refresh_reuse(gen, order)
+    block.order = order
+    return tuple(moves)
+
+
 def write_partial_sass(pilot_root: Path, output: Path) -> None:
     gen, partial, body_io = _patch_pilot(pilot_root)
+    gen.qtc_e_reset_fusion()
     opts = gen.Opts(lam=0.35, w_imb=4.0, w_stall=1.5, window=2, ldc_max=2, rho=1.0, w_h=0.02, w_chain=3.0)
-    full, labels, _blocks = gen.generate("L", lambda _i: ("F",) * 6, opts_s=opts, opts_m=opts)
+    _full, _labels, blocks = gen.generate("L", lambda _i: ("F",) * 6, opts_s=opts, opts_m=opts)
+    main_block, lin8_block = blocks
+    apply_e3_bank_schedule(gen, main_block)
+    lin8 = gen.seal(list(lin8_block.order), min_last_stall=1)
+    main = gen.seal(list(main_block.order))
+    head = gen.HEAD[:2] + ['[B------:R-:W-:-:S05] @P0 BRA `(.L_x_100) ;']
+    full = head + lin8 + ['[B------:R-:W-:-:S05] BRA `(.L_x_8) ;'] + main + gen.TAIL
+    labels = {".L_x_10": 0, ".L_x_6": len(head), ".L_x_100": len(head) + len(lin8) + 1}
     partial_opts = gen.Opts(
         lam=0.1,
         w_imb=4.0,
@@ -430,8 +570,8 @@ def write_partial_sass(pilot_root: Path, output: Path) -> None:
         full + loop,
         labels,
         header=(
-            "QTC E2 model candidate: fused carry correction in full outputs "
-            "0,4,5,6,7,8,9,10,11 and all 12 partial outputs"
+            "QTC E3 model candidate: bank-aware full outputs "
+            "0,2,3,4,5,6,8,9,11 and all 12 partial outputs"
         ),
     )
 
