@@ -36,7 +36,7 @@ def test_fused_fold_matches_materialized_for_random_words():
 
 def test_fused_linear_candidate_passes_model_gate_and_constraints():
     candidate = model.build_report().candidate
-    assert candidate.instructions_removed_per_nonce == 672
+    assert candidate.instructions_removed_per_nonce == 663
     assert candidate.full_f == 1080
     assert candidate.partial_f == 334
     assert candidate.partial_a == 336
@@ -44,9 +44,9 @@ def test_fused_linear_candidate_passes_model_gate_and_constraints():
     assert candidate.predicates == 6
     assert candidate.scoreboards == 6
     assert candidate.spills == 0
-    assert candidate.physics_ed == pytest.approx(1.0377323297265648)
-    assert candidate.corrected_ed == pytest.approx(1.0429092077887785)
-    assert candidate.lcb95_ed == pytest.approx(1.031095919285345)
+    assert candidate.physics_ed == pytest.approx(1.0375115152051728)
+    assert candidate.corrected_ed == pytest.approx(1.0426574796546892)
+    assert candidate.lcb95_ed == pytest.approx(1.030854953522004)
     assert candidate.passes_gate
 
 
@@ -64,6 +64,6 @@ def test_resource_bound_is_exact_for_the_binary_fusion_family():
     assert certificate.exact_resource_optimum
     assert certificate.fused_full_outputs == 12
     assert certificate.fused_partial_outputs == 12
-    assert certificate.physics_ed_upper == pytest.approx(1.0583434947392545)
-    assert certificate.corrected_ed_upper == pytest.approx(1.0664374058362223)
-    assert certificate.corrected_lcb95_upper == pytest.approx(1.0534440543583607)
+    assert certificate.physics_ed_upper == pytest.approx(1.0571278508603397)
+    assert certificate.corrected_ed_upper == pytest.approx(1.065047994784599)
+    assert certificate.corrected_lcb95_upper == pytest.approx(1.0521332850266203)

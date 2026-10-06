@@ -34,16 +34,16 @@ def test_pattern_search_descends_without_cartesian_grid():
 def test_gap_ladder_is_monotone_and_matches_certificate():
     ladder = opt.gap_ladder()
     assert [point.corrected_ed for point in ladder] == sorted(point.corrected_ed for point in ladder)
-    assert ladder[0].corrected_ed == pytest.approx(1.0429092077887785)
-    assert ladder[-1].corrected_ed == pytest.approx(1.0664374058362223)
-    assert ladder[-1].corrected_ed / ladder[0].corrected_ed - 1 == pytest.approx(0.02256015947670975)
+    assert ladder[0].corrected_ed == pytest.approx(1.0426574796546892)
+    assert ladder[-1].corrected_ed == pytest.approx(1.065047994784599)
+    assert ladder[-1].corrected_ed / ladder[0].corrected_ed - 1 == pytest.approx(0.02147446842977141)
 
 
 def test_residual_uncertainty_is_dominated_by_model_and_candidate_transfer():
     report = opt.build_optimizer_report()
     variance = report["residual_variance"]
-    assert variance["model"] / variance["total"] == pytest.approx(0.5198, abs=1e-4)
-    assert variance["candidate"] / variance["total"] == pytest.approx(0.3626, abs=1e-4)
+    assert variance["model"] / variance["total"] == pytest.approx(0.5205, abs=1e-4)
+    assert variance["candidate"] / variance["total"] == pytest.approx(0.3631, abs=1e-4)
     assert report["residual_sensitivity"]["both"] > report["residual_sensitivity"]["current"]
     assert min(lower for _central, lower in report["leave_one_group_out"].values()) > 1.029
 

@@ -12,8 +12,8 @@ existing model gate is central `>=1.015` and one-sided `LCB95>=1.010`; the new
 product goal is an independently confirmed `>=1.04`. QP is outside this
 optimizer: E must first beat D in a randomized paired test.
 
-The best feasible model point, **E2**, is central `1.04291 E/D` and LCB95
-`1.03110`. It passes the existing model gate and clears +4% centrally, but it
+The best feasible model point, **E2**, is central `1.04266 E/D` and LCB95
+`1.03085`. It passes the existing model gate and clears +4% centrally, but it
 does **not** establish +4% with 95% confidence. The decision is therefore
 MODEL-GO for continued offline/SASS validation, not a performance claim and
 not yet authorization for a GPU test.
@@ -75,17 +75,19 @@ were rechecked with 64 seeds. Mask `4081` gives raw `1248.212` vs D
 schedule, **not** a proof of the globally best schedule.
 
 Whole-kernel resources remain within 64 registers, 6 predicates, 6
-scoreboards and zero spills. E2 removes 672 instructions per nonce in the
-weighted model and lowers modeled energy from `509.000` to `503.557 nJ`.
+scoreboards and zero spills. E2 removes 663 instructions per nonce in the
+weighted model and lowers modeled energy from `509.000` to `503.630 nJ`.
+The multiplier is deliberately 15, not 16: the generated L body has 15 common
+full slots while its special `lin8` path remains D.
 
 ## Forecast, bounds, and remaining gap
 
 | point | full cycles | partial cycles | physics E/D | residual-v2 E/D | LCB95 |
 |---|---:|---:|---:|---:|---:|
-| E2 best feasible | 1248.629 | 363.745 | 1.03773 | **1.04291** | **1.03110** |
-| + partial resource floor | 1248.629 | 358.400 | 1.04281 | 1.04870 | 1.03663 |
-| + full resource floor | 1205.333 | 358.400 | 1.05812 | 1.06618 | 1.05320 |
-| + all 12 full fusions | 1205.333 | 358.400 | 1.05834 | **1.06644** | **1.05344** |
+| E2 best feasible | 1248.629 | 363.745 | 1.03751 | **1.04266** | **1.03085** |
+| + partial resource floor | 1248.629 | 358.400 | 1.04259 | 1.04845 | 1.03639 |
+| + full resource floor | 1205.333 | 358.400 | 1.05692 | 1.06481 | 1.05191 |
+| + all 12 full fusions | 1205.333 | 358.400 | 1.05713 | **1.06505** | **1.05213** |
 
 The last row is a certified resource upper bound over all 24 binary fusion
 choices. Each fusion removes one F-pipe instruction and energy while leaving
@@ -94,10 +96,10 @@ without enumerating `2^24` assignments. The `120/128` mixing ceiling supplies
 the cycle floors. Residual-v2 numbers around that bound are forecasts, not
 part of the arithmetic proof.
 
-The remaining corrected gap from E2 to the bound is 2.256%. Most of it is the
-full-round schedule gap (~1.75 percentage points of corrected E/D), then the
+The remaining corrected gap from E2 to the bound is 2.147%. Most of it is the
+full-round schedule gap (~1.64 percentage points of corrected E/D), then the
 partial schedule gap (~0.58 pp); the last three full fusions contribute only
-~0.026 pp through the energy model. This makes full-round scheduling the next
+~0.024 pp through the energy model. This makes full-round scheduling the next
 model-only target.
 
 ## Confidence and useful data
@@ -105,18 +107,18 @@ model-only target.
 Residual v2 is frozen from S15: 18 paired observations in six independent
 groups, coefficient `0.1343555`, covariance `0.00289469`, model log-SD
 `0.00419068`, candidate log-SD `0.0035`. Leave-one-group-out central forecasts
-are `1.04170..1.04368`, with LCB95 `1.02932..1.03204`; every omission retains
+are `1.04146..1.04342`, with LCB95 `1.02909..1.03181`; every omission retains
 the existing GO decision.
 
-Variance shares at E2 are 52.0% historical residual, 36.3% candidate transfer,
-and 11.8% coefficient estimation. The realistic model-only reductions are:
+Variance shares at E2 are 52.1% historical residual, 36.3% candidate transfer,
+and 11.6% coefficient estimation. The realistic model-only reductions are:
 
 | evidence change | projected LCB95 |
 |---|---:|
-| current | 1.03110 |
-| candidate SD 0.0035 -> 0.002 via exact SASS/static evidence | 1.03263 |
-| twice as much independent paired history | 1.03315 |
-| both | 1.03508 |
+| current | 1.03085 |
+| candidate SD 0.0035 -> 0.002 via exact SASS/static evidence | 1.03239 |
+| twice as much independent paired history | 1.03290 |
+| both | 1.03484 |
 
 More D-only telemetry helps normalize clocks, temperature and throttling, but
 cannot identify E/D. The most valuable additional inputs are independent

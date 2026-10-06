@@ -41,7 +41,9 @@ class Anchor:
     partial_f: float = 358.0
     partial_a: float = 336.0
     partial_cycles: float = 399.0
-    full_repeats: int = 16
+    # The generated L body has 15 common full slots plus the special lin8
+    # path.  E changes only the common body; lin8 remains D.
+    full_repeats: int = 15
     partial_repeats: int = 44
     phase_scale: float = 128.0
     max_clock_mhz: float = 1530.0
