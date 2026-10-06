@@ -55,3 +55,7 @@ def test_report_distinguishes_global_resource_bound_from_schedule_search():
     assert report["best_feasible"]["corrected_ed"] > 1.04
     assert report["best_feasible"]["lcb95_ed"] < 1.04
     assert report["current_family_blocker"]["reaches_lcb_1_04"] is False
+    frontier = report["joint_allocator_scheduler_frontier"]
+    assert frontier["evaluated_neighbors"] == 461
+    assert frontier["best_neighbor_lcb95"] < 1.04
+    assert frontier["accepted_as_new_incumbent"] is False

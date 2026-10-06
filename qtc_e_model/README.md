@@ -112,6 +112,13 @@ the scheduler and bank-aware allocator. A whole-kernel recolor to declared
 `<=56` registers is the next occupancy gate; until proven, E2 remains fallback
 and E3 is not promoted.
 
+The first joint local frontier is exhausted: all 461 dependency- and
+physical-register-safe adjacent neighbors around bank-aware E3 were evaluated,
+then the five leaders were confirmed with 64 seeds. The best moved raw cycles
+only `1238.459 -> 1238.405` and LCB95 `1.03429 -> 1.03431`; this immaterial
+change is not a new incumbent. The next search must use multi-operation
+relocate/beam nodes jointly with recoloring, not another single-swap pass.
+
 ## Confidence and useful data
 
 Residual v2 is frozen from S15: 18 paired observations in six independent
