@@ -54,7 +54,10 @@ def main() -> None:
                 "ok": False,
                 "error": str(exc),
                 "code": exc.code,
-                "possiblyAccepted": exc.code == "lost",
+                "outcome": exc.outcome,
+                "operationId": exc.operation_id,
+                "requestSent": exc.request_sent,
+                "possiblyAccepted": exc.possibly_accepted,
             }, ensure_ascii=False, sort_keys=True))
             raise SystemExit(2)
     elif args.command == "drop":

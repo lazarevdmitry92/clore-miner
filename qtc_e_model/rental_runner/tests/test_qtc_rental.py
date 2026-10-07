@@ -180,16 +180,19 @@ def test_action_client_is_a_mockable_subprocess_boundary(tmp_path):
     assert args[:3] == ["--project-root", str(tmp_path), "drop"]
 
 
-def test_action_client_preserves_possibly_accepted_lost_outcome(tmp_path):
+def test_action_client_preserves_the_structured_placement_outcome(tmp_path):
     mock = tmp_path / "mock_lost.py"
     mock.write_text(
         "import json\n"
-        "print(json.dumps({'ok':False,'error':'lost','code':'lost','possiblyAccepted':True}))\n"
+        "print(json.dumps({'ok':False,'error':'busy','code':'lost','outcome':'not_sent',"
+        "'operationId':'op-7','requestSent':False,'possiblyAccepted':False}))\n"
         "raise SystemExit(2)\n"
     )
     with pytest.raises(ActionFailure) as caught:
         ActionClient(mock, tmp_path).call("place")
-    assert caught.value.code == "lost" and caught.value.possibly_accepted is True
+    error = caught.value
+    assert (error.code, error.outcome, error.operation_id) == ("lost", "not_sent", "op-7")
+    assert error.request_sent is False and error.possibly_accepted is False
 
 
 def test_uncertain_placement_without_visible_order_never_closes_pilot(tmp_path):

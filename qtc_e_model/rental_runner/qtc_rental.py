@@ -58,10 +58,14 @@ class Refusal(RuntimeError):
 
 
 class ActionFailure(Refusal):
-    def __init__(self, message: str, code: str | None = None, possibly_accepted: bool = False):
+    def __init__(self, message: str, code: str | None = None, possibly_accepted: bool = False,
+                 outcome: str | None = None, operation_id: str | None = None, request_sent: bool | None = None):
         super().__init__(message)
         self.code = code
         self.possibly_accepted = possibly_accepted
+        self.outcome = outcome
+        self.operation_id = operation_id
+        self.request_sent = request_sent
 
 
 def utc_now() -> dt.datetime:
@@ -468,6 +472,9 @@ class ActionClient:
                     str(payload.get("error") or "public action refused"),
                     code=payload.get("code"),
                     possibly_accepted=bool(payload.get("possiblyAccepted")),
+                    outcome=payload.get("outcome"),
+                    operation_id=payload.get("operationId"),
+                    request_sent=payload.get("requestSent"),
                 )
             raise ActionFailure(
                 f"action failed ({done.returncode}): {' '.join(shlex.quote(x) for x in cmd)}\n{done.stderr.strip()}",
@@ -965,6 +972,9 @@ def run(args) -> dict:
                 placementOutcome="possibly_accepted" if exc.possibly_accepted else "refused",
                 placementErrorCode=exc.code,
                 placementError=str(exc),
+                placementActionOutcome=exc.outcome,
+                placementOperationId=exc.operation_id,
+                placementRequestSent=exc.request_sent,
             )
             raise
         order_id = str(placement["orderId"])
