@@ -25,7 +25,7 @@ re-reads the collector database and requires:
 python3.11 /path/to/qtc-e-rental-runner/qtc_rental.py \
   --project-root "$PWD" \
   --server 69333 --expected-owner 4727 \
-  --runner-inventory-sha256 28319af18dee3c1c2f477f7e90f1e6d7dcf57500ae9f7543eedeb84582d9842c \
+  --runner-inventory-sha256 19394edbaebb3de92d8d39c87ad0ca318f630d0aeb7bb68481aa58846b5cdb97 \
   --image 'ghcr.io/lazarevdmitry92/clore-miner:qtcbench-cuda-<commit>@sha256:<digest>' \
   --output /tmp/qtc-e-atlas-plan
 ```
@@ -41,7 +41,7 @@ Review `plan.json`, then repeat with a fresh output directory and `--yes`:
 python3.11 /path/to/qtc-e-rental-runner/qtc_rental.py \
   --project-root "$PWD" \
   --server 69333 --expected-owner 4727 \
-  --runner-inventory-sha256 28319af18dee3c1c2f477f7e90f1e6d7dcf57500ae9f7543eedeb84582d9842c \
+  --runner-inventory-sha256 19394edbaebb3de92d8d39c87ad0ca318f630d0aeb7bb68481aa58846b5cdb97 \
   --image 'ghcr.io/lazarevdmitry92/clore-miner:qtcbench-cuda-<commit>@sha256:<digest>' \
   --output /tmp/qtc-e-atlas-run-001 --yes
 ```

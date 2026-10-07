@@ -188,7 +188,7 @@ collector's current market data.
    `miner/qtc_e_model/rental_runner/`, which is
    `~/mining/miner/qtc_e_model/rental_runner/` on atlas. Require
    `RUNNER_SHA256SUMS` digest
-   `28319af18dee3c1c2f477f7e90f1e6d7dcf57500ae9f7543eedeb84582d9842c`;
+   `19394edbaebb3de92d8d39c87ad0ca318f630d0aeb7bb68481aa58846b5cdb97`;
    the runner verifies that inventory and records it in `plan.json` and
    `state.json`. From `~/mining`, first produce the no-action plan, review it,
    then use a new output directory and add `--yes`:
@@ -197,7 +197,7 @@ collector's current market data.
    python3.11 miner/qtc_e_model/rental_runner/qtc_rental.py \
      --project-root "$PWD" \
      --server 69333 --expected-owner 4727 \
-     --runner-inventory-sha256 28319af18dee3c1c2f477f7e90f1e6d7dcf57500ae9f7543eedeb84582d9842c \
+     --runner-inventory-sha256 19394edbaebb3de92d8d39c87ad0ca318f630d0aeb7bb68481aa58846b5cdb97 \
      --image 'ghcr.io/lazarevdmitry92/clore-miner:qtcbench-cuda-<40hex>@sha256:<64hex>' \
      --output /tmp/qtc-e-atlas-plan
    ```

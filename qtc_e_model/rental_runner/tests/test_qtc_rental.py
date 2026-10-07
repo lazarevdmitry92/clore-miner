@@ -148,6 +148,14 @@ def test_runner_package_is_bound_to_reviewed_inventory(tmp_path):
         verify_runner_package(tmp_path, expected)
 
 
+def test_checked_in_runner_package_matches_its_documented_inventory():
+    expected = "19394edbaebb3de92d8d39c87ad0ca318f630d0aeb7bb68481aa58846b5cdb97"
+    assert hashlib.sha256((ROOT / "RUNNER_SHA256SUMS").read_bytes()).hexdigest() == expected
+    assert verify_runner_package(ROOT, expected)["inventorySha256"] == expected
+    assert expected in (ROOT / "README.md").read_text()
+    assert expected in (ROOT.parent / "RENTAL.md").read_text()
+
+
 def test_endpoint_only_from_collector_order_mapping():
     order = {"pub_cluster": ["n1.de.clorecloud.net"], "tcp_ports": ["21550:1234", "21559:5678"]}
     assert endpoint_from_order(order) == "http://n1.de.clorecloud.net:5678"
