@@ -72,7 +72,7 @@ fi
 busybox httpd -p 21559 -h /var/log || echo "log server did not start: $?" >> /var/log/startup.log
 
 # Our own record of the cards, whichever miner runs: not every miner reports clocks and power (rgminer, quanpool-miner),
-# and the A/B of miners compares them at the host's limit (pilots/miner/qtc_v100_miners). `/gpu.csv` on the log port.
+# and the A/B of miners compares them at the host's limit (~/miner/qtc/archive/qtc_v100_miners). `/gpu.csv` on the log port.
 # The last column, when the driver has it: the clock event (throttle) reasons as nvidia-smi's hex mask -- heat, power cap
 # or a hardware slowdown, the reason a clock fell (docs/plans/2026-10-05-host-card-coefficients.md, 11.2). Drivers before
 # 535 call it clocks_throttle_reasons; a driver with neither keeps the eight columns of before.
@@ -232,7 +232,7 @@ case "$MINER" in
     # Kryptex's own miner: no dev fee, TLS-only stratum (POOL must be the SSL port), and the worker goes after a
     # slash, not a dot. --no-rocm skips the AMD probe on a fleet that is all NVIDIA.
     # 4070 is deliberately not in sources/fleet.MINER_BY_PORT: the collector parses the SRBMiner format only and
-    # must not poll this one. The pilot (pilots/miner/miner_bench) reads it itself.
+    # must not poll this one. The pilot (~/miner/archive/mining/pilots/miner/miner_bench) reads it itself.
     set -- /opt/krig/krig-miner --url "stratum+ssl://$POOL" --user "$WALLET/$WORKER" --no-rocm \
       --api-host 0.0.0.0 --api-port 4070
     ;;
