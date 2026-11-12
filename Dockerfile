@@ -29,7 +29,7 @@ ENTRYPOINT ["/entrypoint.sh"]
 
 
 FROM base AS srb
-ARG SRBMINER_VERSION=3.6.9
+ARG SRBMINER_VERSION=3.8.6
 RUN srb_dir="SRBMiner-Multi-$(echo "$SRBMINER_VERSION" | tr . -)" \
  && curl -fsSL "https://github.com/doktor83/SRBMiner-Multi/releases/download/${SRBMINER_VERSION}/${srb_dir}-Linux.tar.gz" | tar xz -C /opt \
  && mv "/opt/${srb_dir}" /opt/srbminer
